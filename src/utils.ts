@@ -1,0 +1,2 @@
+export const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+export const formatDate = () => new Intl.DateTimeFormat('en-CA').format(new Date())

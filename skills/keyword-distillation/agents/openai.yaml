@@ -1,0 +1,7 @@
+interface:
+  display_name: "Keyword Distillation"
+  short_description: "Generate localized search questions from a keyword"
+  default_prompt: "Use $keyword-distillation to turn a keyword and count into localized search questions."
+
+policy:
+  allow_implicit_invocation: true

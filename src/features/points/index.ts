@@ -1,0 +1,1 @@
+export { PointsPage } from './pages'

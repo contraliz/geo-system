@@ -1,0 +1,2 @@
+export type Route = 'dashboard' | 'knowledge-bases' | 'knowledge-base-detail' | 'image-libraries' | 'image-library-detail' | 'keyword-distillation' | 'writing-instructions' | 'automatic-creation' | 'article-list' | 'personal-media' | 'records' | 'accounts' | 'website-media' | 'influencers' | 'official-seo' | 'model-validation' | 'compute-points' | 'admin' | 'settings'
+export type CreateKind = 'knowledge' | 'image' | 'keyword' | 'instruction' | 'creation' | 'publishing' | null

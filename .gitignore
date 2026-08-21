@@ -1,0 +1,19 @@
+.geo-publisher/
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+
+# Dependencies and generated output
+node_modules/
+dist.zip
+test-results/
+.DS_Store
+
+# Local agent/editor state
+.claude/settings.local.json
+.workbuddy/
+
+# Build output
+dist/
