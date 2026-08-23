@@ -1,9 +1,12 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { loadPuppeteer, browserExecutablePath, launchBrowser } from './puppeteer.mjs'
+import { loadPuppeteer, browserExecutablePath, launchBrowser, revealBrowser } from './puppeteer.mjs'
 import { updateAccount, updateJob } from './store.mjs'
-import { deleteCookies, loadCookies, saveCookies } from './vault.mjs'
+import { deleteSession, loadSession, saveSession } from './vault.mjs'
 import { trace as logTrace } from './trace.mjs'
+import { CommonPublisher, extractFirstMarkdownImage, markdownToPlainText, markdownToSafeHtml, randomizedPacing, safeHttpUrl, writePageSnapshot } from './common.mjs'
+import { authorizeAccountWithElectron } from './account-auth.mjs'
+import { removeAccountProfile } from './profile.mjs'
 
 const CREATOR_URL = process.env.GEO_ZHIHU_CREATOR_URL || 'https://zhuanlan.zhihu.com/write'
 const pendingSessions = new Map()
@@ -28,6 +31,95 @@ const PUBLISH_DIAGNOSTIC_RESPONSE_LIMIT = 100
 const PUBLISH_CONFIRMATION_TIMEOUT_MS = Number(process.env.GEO_PUBLISHER_CONFIRMATION_TIMEOUT_MS || 90_000)
 const SAFE_PUBLISH_RESPONSE_KEYS = new Set(['code', 'status', 'error', 'message', 'success', 'id', 'url', 'article_id', 'articleId', 'articleUrl', 'article_url', 'data', 'result'])
 const SAFE_PUBLISH_RESPONSE_VALUE_LIMIT = 500
+const COMMON_PUBLISHER = new CommonPublisher({ platform: 'zhihu', pacingMode: process.env.GEO_PUBLISHER_PACING || 'human' })
+
+const ZHIHU_ACCOUNT_NAME_SELECTORS = ['.AppHeader-profile .name', '[class*="UserInfo"] .name', '[class*="Avatar"] + *', '[class*="name"]']
+const ZHIHU_ACCOUNT_AVATAR_SELECTORS = ['.AppHeader-profile img', '[class*="Avatar"] img', 'img.Avatar']
+const ZHIHU_LOGIN_URL = 'https://www.zhihu.com/signin'
+const ZHIHU_HOME_URL = 'https://www.zhihu.com/'
+const TITLE_NOISE_RE = /知乎|登录|首页|创作中心|创作者中心|管理|后台/g
+
+function normalizeAccountName(value) {
+  const name = String(value || '').replace(TITLE_NOISE_RE, '').replace(/[-|–—]/g, '').trim()
+  return name && name.length < 80 ? name : null
+}
+
+async function readZhihuStorage(page) {
+  return page.evaluate(() => {
+    const read = storage => {
+      const result = {}
+      try {
+        for (let index = 0; index < storage.length; index += 1) {
+          const key = storage.key(index)
+          if (key) result[key] = storage.getItem(key) || ''
+        }
+      } catch { /* storage may be blocked on a login interstitial */ }
+      return result
+    }
+    return { localStorage: read(localStorage), sessionStorage: read(sessionStorage), origin: location.origin }
+  }).catch(() => ({ localStorage: {}, sessionStorage: {}, origin: '' }))
+}
+
+async function readZhihuIdentity(page) {
+  return page.evaluate(({ nameSelectors, avatarSelectors }) => {
+    const text = selectors => {
+      for (const selector of selectors) {
+        const element = document.querySelector(selector)
+        const value = (element?.textContent || element?.getAttribute?.('title') || element?.getAttribute?.('alt') || '').trim()
+        if (value) return value
+      }
+      return ''
+    }
+    const image = selectors => {
+      for (const selector of selectors) {
+        const element = document.querySelector(selector)
+        const value = element?.getAttribute?.('src') || element?.getAttribute?.('data-src') || ''
+        if (value) return value.startsWith('//') ? `https:${value}` : value
+      }
+      return ''
+    }
+    return { accountName: text(nameSelectors), avatarUrl: image(avatarSelectors), title: document.title || '' }
+  }, { nameSelectors: ZHIHU_ACCOUNT_NAME_SELECTORS, avatarSelectors: ZHIHU_ACCOUNT_AVATAR_SELECTORS }).catch(() => ({ accountName: '', avatarUrl: '', title: '' }))
+}
+
+// Loke captures cookies plus both Web Storage areas after manual confirmation.
+// This adapter keeps that lifecycle but persists the payload in our encrypted
+// vault and never emits the session values to the HTTP/UI layers.
+export async function captureZhihuSession(page, account) {
+  const cookies = await page.cookies().catch(() => [])
+  const storage = await readZhihuStorage(page)
+  const identity = await readZhihuIdentity(page)
+  const accountName = normalizeAccountName(identity.accountName) || normalizeAccountName(identity.title)
+  await saveSession(account.id, { cookies, localStorage: storage.localStorage, sessionStorage: storage.sessionStorage, origin: storage.origin })
+  const patch = {
+    sessionCapturedAt: new Date().toISOString(),
+    lastAuthAt: new Date().toISOString(),
+    accountName: accountName || account.accountName || null,
+    avatarUrl: safeHttpUrl(identity.avatarUrl) || account.avatarUrl || null,
+  }
+  await updateAccount(account.id, patch)
+  logTrace('verify', 'Captured Zhihu browser session', { accountId: account.id, cookieCount: cookies.length, localStorageKeys: Object.keys(storage.localStorage).length, sessionStorageKeys: Object.keys(storage.sessionStorage).length, hasAccountName: Boolean(patch.accountName), hasAvatar: Boolean(patch.avatarUrl) })
+  return { ...storage, cookies, accountName: patch.accountName, avatarUrl: patch.avatarUrl }
+}
+
+async function restoreZhihuSession(page, account, { navigate = true, url = ZHIHU_HOME_URL } = {}) {
+  const session = await loadSession(account.id)
+  if (session.cookies.length) await page.setCookie(...session.cookies)
+  if (navigate) await navigateAndWait(page, url, 'Zhihu account session')
+  const hasStorage = Object.keys(session.localStorage).length > 0 || Object.keys(session.sessionStorage).length > 0
+  if (hasStorage) {
+    await page.evaluate(({ localStorageData, sessionStorageData }) => {
+      for (const [key, value] of Object.entries(localStorageData || {})) localStorage.setItem(key, value)
+      for (const [key, value] of Object.entries(sessionStorageData || {})) sessionStorage.setItem(key, value)
+    }, { localStorageData: session.localStorage, sessionStorageData: session.sessionStorage }).catch(() => {})
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
+  }
+  return session
+}
+
+async function publisherPacing(minMs, maxMs, label, mode) {
+  return COMMON_PUBLISHER.delay(minMs, maxMs, { mode, logger: milliseconds => logTrace('prepare', `Publisher pacing: ${label}`, { milliseconds }) })
+}
 
 export function getZhihuPublisherMode(account) {
   const mode = account?.mode
@@ -366,6 +458,28 @@ export async function pasteWithTrustedInput(page, text) {
   await page.keyboard.sendCharacter(text)
 }
 
+export async function pasteHtmlWithTrustedInput(page, html, plainText) {
+  // Put sanitized HTML on the browser clipboard, then use the real keyboard
+  // paste path so React/ProseMirror receives a trusted beforeinput event. We
+  // never assign innerHTML from Node, which would bypass editor state.
+  const available = await page.evaluate(async ({ html: htmlValue, plain }) => {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') return false
+    try {
+      const item = new ClipboardItem({
+        'text/html': new Blob([htmlValue], { type: 'text/html' }),
+        'text/plain': new Blob([plain], { type: 'text/plain' }),
+      })
+      await navigator.clipboard.write([item])
+      return true
+    } catch { return false }
+  }, { html, plain: plainText }).catch(() => false)
+  if (!available) return false
+  const modifier = process.platform === 'darwin' ? 'Meta' : 'Control'
+  await page.keyboard.down(modifier)
+  try { await page.keyboard.press('V') } finally { await page.keyboard.up(modifier) }
+  return true
+}
+
 async function typeWithTrustedInput(page, text) {
   // Some older Draft.js builds ignore one large insertText payload. The
   // per-character Input.insertText fallback still updates the real editor,
@@ -518,7 +632,7 @@ function editorStateDiagnostic(state) {
 // retained it. Both attempts use trusted browser input after a real click;
 // direct DOM mutation is intentionally avoided because it can create visible
 // overlay text without updating Zhihu's React state.
-async function writeField(page, selectField, text, { prefix, label }) {
+async function writeField(page, selectField, text, { prefix, label, html = null }) {
   let lastDiagnostic = null
   const attempt = async (mode) => {
     const handle = selectField(await waitForEditor(page))
@@ -526,12 +640,16 @@ async function writeField(page, selectField, text, { prefix, label }) {
     // Every retry re-discovers, clicks, selects all, and clears first; a
     // partial trusted insertion can therefore never be followed by an append.
     await focusAndClear(page, handle)
-    if (mode === 'paste') await pasteWithTrustedInput(page, text)
+    if (mode === 'html-paste') {
+      const pasted = await pasteHtmlWithTrustedInput(page, html, text)
+      if (!pasted) throw new Error('Trusted HTML clipboard paste is unavailable.')
+    } else if (mode === 'paste') await pasteWithTrustedInput(page, text)
     else await typeWithTrustedInput(page, text)
     return metadata
   }
 
-  for (const mode of ['paste', 'keyboard']) {
+  const modes = html ? ['html-paste', 'paste', 'keyboard'] : ['paste', 'keyboard']
+  for (const mode of modes) {
     try {
       const metadata = await attempt(mode)
       await sleep(ACTION_PAUSE_MS)
@@ -561,6 +679,31 @@ const selectBody = fields => fields.editor
 
 function isLoginPage(url) {
   return /login|signin|captcha|security/i.test(url)
+}
+
+// Zhihu may render a full-page 10001 banner before any login controls are
+// available. Keep this separate from normal login detection so the UI can tell
+// the user to update/reopen the client rather than asking them to retry login.
+export async function detectZhihuClientError(page) {
+  const text = await page.$eval('body', element => `${element.innerText || ''}\n${document.title || ''}`).catch(() => '')
+  if (!/10001|请求参数异常|升级客户端|upgrade.?client/i.test(text)) return null
+  return {
+    errorCode: 'zhihu-client-outdated',
+    message: 'Zhihu returned 10001 (请求参数异常). Update the client or reopen the account profile, then try again.',
+  }
+}
+
+async function persistZhihuClientError(page, account) {
+  const issue = await detectZhihuClientError(page)
+  if (!issue) return null
+  await updateAccount(account.id, {
+    status: 'error',
+    errorCode: issue.errorCode,
+    lastCheckedAt: new Date().toISOString(),
+    lastError: issue.message,
+  })
+  logTrace('verify', 'Zhihu account page reported a client error', { accountId: account.id, errorCode: issue.errorCode })
+  return issue
 }
 
 async function detectLoginRequired(page, { settleMs = 1500 } = {}) {
@@ -597,7 +740,7 @@ async function launchAccountBrowser(account, { visible }) {
   await fs.mkdir(account.profileDir, { recursive: true, mode: 0o700 })
   const executablePath = browserExecutablePath()
   logTrace('prepare', 'Chrome executable resolved', { accountId: account.id, executablePath: executablePath || '(none, using puppeteer default)', macBundle: process.platform === 'darwin' })
-  const browser = await launchBrowser(puppeteer, { headless: !visible, userDataDir: account.profileDir, executablePath })
+  const browser = await launchBrowser(puppeteer, { headless: !visible, visible, userDataDir: account.profileDir, executablePath, accountId: account.id, platform: account.platform || 'zhihu' })
   logTrace('prepare', 'Browser launched', { accountId: account.id, mode: visible ? 'visible' : 'headless' })
   return browser
 }
@@ -631,23 +774,33 @@ export async function resetZhihuAccount(account) {
     pendingJobSessions.delete(jobId)
     await session.browser.close().catch(() => {})
   }
-  await deleteCookies(account.id).catch(() => {})
-  if (account.profileDir) await fs.rm(account.profileDir, { recursive: true, force: true }).catch(() => {})
+  if (account.profileDir) await removeAccountProfile(account.profileDir)
+  await deleteSession(account.id)
   logTrace('prepare', 'Cleared Zhihu account session', { accountId: account.id })
 }
 
 export async function startZhihuAccountSetup(account, { visible = true } = {}) {
+  // Account authorization is intentionally owned by Electron. The old
+  // Puppeteer launcher remains available for publishing workers, but it is
+  // never used as a silent fallback for manual login: auth needs an isolated
+  // partition and the Loke-style top-level Finish authorization action.
+  if (visible) return startElectronAccountSetup(account)
   logTrace('prepare', 'Begin Zhihu account configuration', { accountId: account.id, visible, profileDir: account.profileDir })
+  const existing = pendingSessions.get(account.id)
+  if (existing) {
+    pendingSessions.delete(account.id)
+    await existing.browser.close().catch(() => {})
+  }
   const browser = await launchAccountBrowser(account, { visible })
   let keepOpen = false
   try {
     const page = await getWorkingPage(browser, { visible })
-    const cookies = await loadCookies(account.id)
-    if (cookies.length) await page.setCookie(...cookies)
-    await navigateAndWait(page, 'https://www.zhihu.com/', 'Zhihu account setup')
+    await restoreZhihuSession(page, account, { url: ZHIHU_LOGIN_URL })
     pendingSessions.set(account.id, { browser, page })
     keepOpen = visible
-    await updateAccount(account.id, { status: 'login-required', lastCheckedAt: null, lastError: null })
+    const clientError = await persistZhihuClientError(page, account)
+    if (clientError) return { status: 'error', ...clientError, url: page.url() }
+    await updateAccount(account.id, { status: 'login-required', lastCheckedAt: null, lastError: null, errorCode: null })
     logTrace('prepare', 'Account configured; waiting for user verification', { accountId: account.id, url: page.url() })
     return { status: 'login-required', url: page.url(), message: 'Account configured. Finish login in the opened browser, then click Verify account.' }
   } catch (error) {
@@ -665,17 +818,16 @@ async function verifyWithFreshBrowser(account) {
   const browser = await launchAccountBrowser(account, { visible: false })
   try {
     const page = await getWorkingPage(browser)
-    const cookies = await loadCookies(account.id)
-    if (cookies.length) await page.setCookie(...cookies)
-    await navigateAndWait(page, 'https://www.zhihu.com/', 'Zhihu account verification')
+    await restoreZhihuSession(page, account)
+    const clientError = await persistZhihuClientError(page, account)
+    if (clientError) return { status: 'error', ...clientError }
     const loginRequired = await detectLoginRequired(page)
     if (loginRequired) {
-      await updateAccount(account.id, { status: 'login-required', lastCheckedAt: new Date().toISOString(), lastError: 'Login is still required.' })
+      await updateAccount(account.id, { status: 'login-required', lastCheckedAt: new Date().toISOString(), lastError: 'Login is still required.', errorCode: null })
       return { status: 'login-required', message: 'The account is not verified. Check the cookie session and try again.' }
     }
-    const fresh = await page.cookies()
-    if (fresh.length) await saveCookies(account.id, fresh).catch(() => {})
-    await updateAccount(account.id, { status: 'ready', lastCheckedAt: new Date().toISOString(), lastError: null })
+    await captureZhihuSession(page, account)
+    await updateAccount(account.id, { status: 'ready', lastCheckedAt: new Date().toISOString(), lastError: null, errorCode: null })
     return { status: 'ready', message: 'Zhihu account verified. Future jobs can use this profile.' }
   } finally {
     await browser.close().catch(() => {})
@@ -687,20 +839,20 @@ export async function verifyZhihuAccount(account) {
   logTrace('verify', 'Begin Zhihu verify sequence', { accountId: account.id, hasPendingSession: Boolean(session) })
   if (!session) return verifyWithFreshBrowser(account)
   try {
-    await navigateAndWait(session.page, 'https://www.zhihu.com/', 'Zhihu account verification')
+    await restoreZhihuSession(session.page, account)
     logTrace('verify', 'Re-navigated to zhihu.com', { accountId: account.id, url: session.page.url() })
+    const clientError = await persistZhihuClientError(session.page, account)
+    if (clientError) return { status: 'error', ...clientError }
     const loginRequired = await detectLoginRequired(session.page)
     logTrace('verify', 'Login detection finished', { accountId: account.id, loginRequired, url: session.page.url() })
     if (loginRequired) {
-      await updateAccount(account.id, { status: 'login-required', lastCheckedAt: new Date().toISOString(), lastError: 'Login is still required.' })
+      await updateAccount(account.id, { status: 'login-required', lastCheckedAt: new Date().toISOString(), lastError: 'Login is still required.', errorCode: null })
       return { status: 'login-required', message: 'The account is still not logged in.' }
     }
     try {
-      const fresh = await session.page.cookies()
-      if (fresh.length) await saveCookies(account.id, fresh).catch(() => {})
-      logTrace('verify', 'Persisted cookies back to vault', { accountId: account.id, count: fresh.length })
-    } catch (error) { logTrace('verify', 'Cookie persistence failed', { accountId: account.id, error: error.message }) }
-    await updateAccount(account.id, { status: 'ready', lastCheckedAt: new Date().toISOString(), lastError: null })
+      await captureZhihuSession(session.page, account)
+    } catch (error) { logTrace('verify', 'Session persistence failed', { accountId: account.id, error: error.message }) }
+    await updateAccount(account.id, { status: 'ready', lastCheckedAt: new Date().toISOString(), lastError: null, errorCode: null })
     pendingSessions.delete(account.id)
     await session.browser.close().catch(() => {})
     logTrace('verify', 'Verify sequence completed, status ready', { accountId: account.id })
@@ -713,9 +865,58 @@ export async function verifyZhihuAccount(account) {
 }
 
 async function loadAccountCookies(page, account) {
-  const cookies = await loadCookies(account.id)
-  if (cookies.length) await page.setCookie(...cookies)
-  return cookies.length
+  const session = await loadSession(account.id)
+  if (session.cookies.length) await page.setCookie(...session.cookies)
+  return session.cookies.length
+}
+
+export async function startElectronAccountSetup(account) {
+  logTrace('prepare', 'Launching Electron account authorization window', { accountId: account.id, platform: account.platform, mode: 'electron' })
+  try {
+    const result = await authorizeAccountWithElectron(account, { hydrateSession: true })
+    logTrace('verify', 'Electron authorization result persisted', { accountId: account.id, status: result.status, cookieCount: result.cookieCount || 0, hasAccountName: Boolean(result.accountName), hasAvatar: Boolean(result.avatarUrl) })
+    return result
+  } catch (error) {
+    await updateAccount(account.id, { status: 'error', lastCheckedAt: new Date().toISOString(), lastError: error.message, errorCode: /Electron authorization is unavailable/i.test(error.message) ? 'electron-unavailable' : 'auth-window-error' })
+    logTrace('prepare', 'Electron account authorization failed', { accountId: account.id, errorCode: /Electron authorization is unavailable/i.test(error.message) ? 'electron-unavailable' : 'auth-window-error' })
+    throw error
+  }
+}
+
+// Equivalent to Loke's "open account" action: reuse the account's persistent
+// profile and leave a visible browser open at the Zhihu home page.  It does
+// not change the account status or delete/recreate the profile.
+export async function openZhihuAccount(account, { visible = true } = {}) {
+  const current = pendingSessions.get(account.id)
+  if (current && !current.page.isClosed()) {
+    const clientError = await persistZhihuClientError(current.page, account)
+    if (clientError) return { status: 'error', ...clientError, url: current.page.url(), reused: true }
+    return { status: account.status, url: current.page.url(), reused: true }
+  }
+  const browser = await launchAccountBrowser(account, { visible })
+  try {
+    const page = await getWorkingPage(browser, { visible })
+    await restoreZhihuSession(page, account)
+    pendingSessions.set(account.id, { browser, page })
+    const clientError = await persistZhihuClientError(page, account)
+    if (clientError) return { status: 'error', ...clientError, url: page.url() }
+    logTrace('open', 'Opened Zhihu account profile', { accountId: account.id, url: page.url() })
+    return { status: account.status, url: page.url(), reused: false }
+  } catch (error) {
+    await browser.close().catch(() => {})
+    throw error
+  }
+}
+
+async function recaptureZhihuSession(page, account) {
+  try {
+    const fresh = await captureZhihuSession(page, account)
+    logTrace('publish', 'Persisted refreshed Zhihu session after publish', { accountId: account.id, cookieCount: fresh.cookies.length })
+    return fresh.cookies.length
+  } catch (error) {
+    logTrace('publish', 'Could not persist refreshed Zhihu session', { accountId: account.id, error: error.message })
+    return 0
+  }
 }
 
 async function fillZhihuDraft(page, job) {
@@ -733,13 +934,64 @@ async function fillZhihuDraft(page, job) {
   if (await detectLoginRequired(page, { settleMs: 0 })) return { loginRequired: true }
 
   const titleText = String(job.title).trim()
-  const bodyText = String(job.content).trim()
+  const bodyMarkdown = String(job.content).trim()
+  const bodyText = markdownToPlainText(bodyMarkdown)
+  const bodyHtml = markdownToSafeHtml(bodyMarkdown)
 
   await writeField(page, selectTitle, titleText, { prefix: titleText.slice(0, 20), label: 'title' })
-  await writeField(page, selectBody, bodyText, { prefix: bodyText.slice(0, 30), label: 'body' })
+  await writeField(page, selectBody, bodyText, { prefix: bodyText.slice(0, 30), label: 'body', html: bodyHtml })
   await settle(page)
   await waitForDraftStable(page)
   return { loginRequired: false }
+}
+
+async function clickVisiblePublisherControl(page, pattern) {
+  const handles = await page.$$('button, [role="button"], label, input[type="checkbox"], input[type="radio"], span, div')
+  for (const handle of handles) {
+    const meta = await handle.evaluate(element => {
+      const rect = element.getBoundingClientRect()
+      const style = element.ownerDocument.defaultView?.getComputedStyle(element)
+      const text = `${element.textContent || ''} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''}`.replace(/\s+/g, ' ').trim()
+      return { text, visible: Boolean((rect.width || rect.height) && style?.display !== 'none' && style?.visibility !== 'hidden'), disabled: Boolean(element.disabled) || element.getAttribute('aria-disabled') === 'true', tag: element.tagName.toLowerCase() }
+    }).catch(() => null)
+    if (!meta?.visible || meta.disabled || meta.text.length > 180 || !pattern.test(meta.text)) continue
+    const targetHandle = await handle.evaluateHandle(element => element.closest('label,button,[role="button"]') || element).catch(() => null)
+    const target = targetHandle?.asElement?.() || handle
+    await target.click({ delay: 70 }).catch(() => {})
+    if (targetHandle && targetHandle !== handle) await targetHandle.dispose?.().catch(() => {})
+    return true
+  }
+  return false
+}
+
+export async function selectFirstDocumentImageCover(page, imageUrl = null) {
+  const safeImageUrl = imageUrl && /^https?:\/\//i.test(imageUrl) ? imageUrl : null
+  const opened = await clickVisiblePublisherControl(page, /^(?:设置|选择)?\s*封面|封面设置|选择封面/i)
+  if (!opened) return { selected: false, reason: 'cover-control-not-found' }
+  await sleep(ACTION_PAUSE_MS)
+  const images = await page.$$('img')
+  for (const image of images) {
+    const match = await image.evaluate((element, expected) => {
+      const rect = element.getBoundingClientRect()
+      const style = element.ownerDocument.defaultView?.getComputedStyle(element)
+      const src = element.currentSrc || element.getAttribute('src') || ''
+      const matches = !expected || src === expected || src.includes(expected) || expected.includes(src)
+      return { visible: Boolean((rect.width || rect.height) && style?.display !== 'none' && style?.visibility !== 'hidden'), matches }
+    }, safeImageUrl).catch(() => false)
+    if (!match?.visible || !match.matches) continue
+    const targetHandle = await image.evaluateHandle(element => element.closest('button,[role="button"],label,[data-testid]') || element).catch(() => null)
+    const target = targetHandle?.asElement?.() || image
+    await target.click({ delay: 70 }).catch(() => {})
+    if (targetHandle && targetHandle !== image) await targetHandle.dispose?.().catch(() => {})
+    await clickVisiblePublisherControl(page, /^(?:确定|完成|使用此图|确认)/i)
+    return { selected: true }
+  }
+  return { selected: false, reason: safeImageUrl ? 'body-image-not-found' : 'cover-image-url-unavailable' }
+}
+
+export async function selectAiDisclosure(page) {
+  const selected = await clickVisiblePublisherControl(page, /AI\s*(?:生成|创作|声明)|人工智能\s*(?:生成|创作)|(?:包含|声明).{0,12}AI/i)
+  return { selected }
 }
 
 export async function prepareZhihuJob(job, account, { load = loadPuppeteer, launch = launchBrowser } = {}) {
@@ -768,18 +1020,20 @@ export async function prepareZhihuJob(job, account, { load = loadPuppeteer, laun
   try {
     await fs.mkdir(job.artifactDir, { recursive: true, mode: 0o700 })
     logTrace('prepare-browser-launch', 'Launching browser', { jobId: job.id, visible, executablePath })
-    browser = await launch(puppeteer, { headless: !visible, userDataDir: account.profileDir, executablePath })
+    browser = await launch(puppeteer, { headless: !visible, visible, userDataDir: account.profileDir, executablePath, accountId: account.id, platform: account.platform || 'zhihu' })
     logTrace('prepare-get-working-page', 'Getting working page', { jobId: job.id })
     page = await getWorkingPage(browser, { visible })
     await loadAccountCookies(page, account)
     await updateJob(job.id, { status: 'editor-open', error: null })
+    await writePageSnapshot(page, { artifactDir: job.artifactDir, label: '01-editor-ready', extra: { jobId: job.id, platform: 'zhihu', aiDisclosure: Boolean(job.aiDisclosure), coverFirstBodyImage: job.coverFirstBodyImage !== false } })
     logTrace('prepare-wait-editor-ready', 'Waiting for Zhihu editor readiness', { accountId: account.id, jobId: job.id, visible })
     const draft = await fillZhihuDraft(page, job)
     if (draft.loginRequired) {
       logTrace('prepare-login-required', 'Login required for job', { jobId: job.id })
+      revealBrowser(browser)
       await updateJob(job.id, { status: 'login-required', error: 'Zhihu requires login or a manual security check.' })
       await updateAccount(account.id, { status: 'login-required', lastCheckedAt: new Date().toISOString(), lastError: 'Manual login required.' })
-      if (visible) {
+      if (visible || process.env.GEO_PUBLISHER_RUNTIME === 'electron') {
         pendingJobSessions.set(job.id, { browser, page, accountId: account.id })
         keepOpen = true
       }
@@ -787,26 +1041,64 @@ export async function prepareZhihuJob(job, account, { load = loadPuppeteer, laun
     }
     logTrace('prepare-content-filled', 'Content filled for job', { jobId: job.id })
     await updateJob(job.id, { status: 'content-filled' })
+    await writePageSnapshot(page, { artifactDir: job.artifactDir, label: '02-after-fill-content', extra: { bodyFormat: 'sanitized-markdown-html' } })
+    const firstBodyImage = extractFirstMarkdownImage(job.content)
+    if (job.coverFirstBodyImage !== false && firstBodyImage) {
+      await publisherPacing(8_000, 15_000, 'before cover selection', job.pacingMode)
+      await writePageSnapshot(page, { artifactDir: job.artifactDir, label: '03-before-cover-select', extra: { imagePresent: true } })
+      const coverResult = await selectFirstDocumentImageCover(page, job.coverImageUrl || firstBodyImage)
+      await updateJob(job.id, { coverStatus: coverResult.selected ? 'selected' : `skipped:${coverResult.reason}` })
+      await writePageSnapshot(page, { artifactDir: job.artifactDir, label: '04-after-cover-select', extra: coverResult })
+    }
+    if (job.aiDisclosure) {
+      const disclosureResult = await selectAiDisclosure(page)
+      await updateJob(job.id, { aiDisclosureSelected: disclosureResult.selected })
+      await writePageSnapshot(page, { artifactDir: job.artifactDir, label: '04b-after-ai-disclosure', extra: disclosureResult })
+    }
     const publishReadiness = await inspectPublishReadiness(page)
     logTrace('prepare', 'Zhihu publish control readiness inspected', { jobId: job.id, ...publishReadiness })
     if (!publishReadiness.ready) throw new Error('Exact Zhihu publish control is not visible and enabled; draft was retained for inspection.')
     await page.screenshot({ path: path.join(job.artifactDir, 'prepared.png'), fullPage: true })
     await updateJob(job.id, { status: 'draft-saved' })
-    await updateJob(job.id, { status: 'awaiting-approval' })
-    logTrace('prepare-draft-ready', 'Zhihu draft is ready for approval', { accountId: account.id, jobId: job.id, visible })
-    if (visible) {
-      // Keep the exact prepared page alive. Approval must publish the draft
-      // that was inspected, rather than opening a new blank editor.
-      pendingJobSessions.set(job.id, { browser, page, accountId: account.id })
-      keepOpen = true
+    if (job.approvalRequired) {
+      await updateJob(job.id, { status: 'awaiting-approval' })
+      logTrace('prepare-draft-ready', 'Zhihu draft is ready for optional manual review', { accountId: account.id, jobId: job.id, visible })
+      if (visible) {
+        // Keep the exact prepared page alive for an explicitly requested
+        // manual-review flow.
+        pendingJobSessions.set(job.id, { browser, page, accountId: account.id })
+        keepOpen = true
+      }
+    } else {
+      // Loke-compatible default: after the editor is ready, publish without a
+      // separate approval gate. The opt-in approvalRequired flag remains a
+      // safety mode for operators who want to inspect the draft first.
+      const approvedAt = new Date().toISOString()
+      await updateJob(job.id, { approvedAt, status: 'publishing' })
+      if (visible) {
+        pendingJobSessions.set(job.id, { browser, page, accountId: account.id })
+        keepOpen = true
+      } else {
+        // Background publishing opens a fresh stateless worker session; close
+        // the preparation browser first so the account profile is exclusive.
+        await browser.close()
+        browser = null
+      }
+      const published = await publishZhihuJob({ ...job, approvedAt }, account)
+      await updateJob(job.id, { status: 'published', externalUrl: published.externalUrl || null, error: null })
+      keepOpen = false
+      logTrace('prepare-published', 'Zhihu article published', { accountId: account.id, jobId: job.id, externalUrl: published.externalUrl })
     }
     logTrace('prepare-job-success', 'Job preparation completed successfully', { jobId: job.id })
   } catch (error) {
     logTrace('prepare-job-error', 'Zhihu draft preparation failed', { accountId: account.id, jobId: job.id, error: error.message, stack: error.stack })
     if (page && !page.isClosed()) await page.screenshot({ path: path.join(job.artifactDir, 'prepare-failed.png'), fullPage: true }).catch(() => {})
-    const retainForInspection = visible && page && !page.isClosed()
+    const retainedSession = pendingJobSessions.get(job.id)
+    const inspectionPage = page && !page.isClosed() ? page : retainedSession?.page
+    const retainForInspection = (visible || process.env.GEO_PUBLISHER_RUNTIME === 'electron') && Boolean(inspectionPage && !inspectionPage.isClosed())
+    if (browser) revealBrowser(browser)
     if (retainForInspection) {
-      pendingJobSessions.set(job.id, { browser, page, accountId: account.id })
+      if (!retainedSession) pendingJobSessions.set(job.id, { browser, page: inspectionPage, accountId: account.id })
       keepOpen = true
     }
     await updateJob(job.id, { status: retainForInspection ? 'failed-inspection' : 'failed', error: error.message })
@@ -950,7 +1242,7 @@ export function sanitizePublishResponsePayload(payload, depth = 0) {
 }
 
 function responsePayloadText(payload) {
-  return [payload?.error, payload?.message].filter(Boolean).join(' ').slice(0, SAFE_PUBLISH_RESPONSE_VALUE_LIMIT)
+  return [payload?.error, payload?.message, payload?.msg, payload?.error_msg].filter(Boolean).join(' ').slice(0, SAFE_PUBLISH_RESPONSE_VALUE_LIMIT)
 }
 
 function findPublicUrlInPayload(payload) {
@@ -990,8 +1282,9 @@ export function classifyPublishResponse({ httpStatus = null, payload = {}, url =
   const status = Number(httpStatus)
   const code = payload?.code
   const message = responsePayloadText(payload)
+  const clientUpgradeRequired = String(code) === '10001' || /10001/.test(message) || /请求参数异常|升级客户端|upgrade.?client/i.test(message)
   const rateLimited = /rate.?limit|too many|频繁|过于频繁|稍后再试|操作频繁|限制/i.test(message) || status === 429 || code === 429
-  const applicationError = rateLimited || (Number.isFinite(status) && status >= 400) || payload?.success === false || (code !== undefined && code !== null && ![0, 200, '0', '200'].includes(code)) || Boolean(payload?.error)
+  const applicationError = rateLimited || clientUpgradeRequired || (Number.isFinite(status) && status >= 400) || payload?.success === false || (code !== undefined && code !== null && ![0, 200, '0', '200'].includes(code)) || Boolean(payload?.error)
   const publicUrl = normalizePublicArticleUrl(findPublicUrlInPayload(payload)) || (findArticleIdInPayload(payload) ? `https://zhuanlan.zhihu.com/p/${findArticleIdInPayload(payload)}` : '')
   return {
     seen: true,
@@ -1000,8 +1293,10 @@ export function classifyPublishResponse({ httpStatus = null, payload = {}, url =
     url: sanitizeDiagnosticUrl(url),
     applicationError,
     rateLimited,
+    clientUpgradeRequired,
+    errorCode: clientUpgradeRequired ? 'zhihu-client-outdated' : null,
     publicUrl,
-    message,
+    message: clientUpgradeRequired ? `10001: 请求参数异常，请升级客户端后重试。${message ? ` ${message}` : ''}` : message,
   }
 }
 
@@ -1287,7 +1582,7 @@ export async function clickPublishAndConfirm(page, beforeUrl, { effectSignal = n
 export async function publishZhihuJob(job, account) {
   const puppeteer = await loadPuppeteer()
   if (!puppeteer) throw new Error('Puppeteer is not installed.')
-  if (!job.approvedAt) throw new Error('Job approval is required before publishing.')
+  if (!job.approvedAt) throw new Error('Publishing requires a prepared task approval timestamp.')
   const strategy = getZhihuPublishStrategy(account)
   const mode = strategy.mode
   const visible = strategy.visible
@@ -1307,9 +1602,9 @@ export async function publishZhihuJob(job, account) {
     session = null
   }
   const executablePath = browserExecutablePath()
-  const browser = session?.browser || await launchBrowser(puppeteer, { headless: strategy.headless, userDataDir: account.profileDir, executablePath })
+  const browser = session?.browser || await launchBrowser(puppeteer, { headless: strategy.headless, visible, userDataDir: account.profileDir, executablePath, accountId: account.id, platform: account.platform || 'zhihu' })
   // Visible sessions are retained for human inspection after a failed
-  // approval-gated publish. Background sessions are always cleaned up here;
+  // publish. Background sessions are always cleaned up here;
   // they never reuse or retain the visible browser path.
   let keepOpen = Boolean(session && strategy.usePendingSession)
   let page = null
@@ -1320,15 +1615,17 @@ export async function publishZhihuJob(job, account) {
     if (!session) {
       await loadAccountCookies(page, account)
       const draft = await fillZhihuDraft(page, job)
-      if (draft.loginRequired) throw new Error('Zhihu requires login or a manual security check.')
+      if (draft.loginRequired) { revealBrowser(browser); throw new Error('Zhihu requires login or a manual security check.') }
       const publishReadiness = await waitForPublishReadiness(page)
       logTrace('publish', 'Background Zhihu publish control became ready', { jobId: job.id, ...publishReadiness })
     } else {
       await waitForPageReady(page, 'Prepared Zhihu draft')
-      if (await detectLoginRequired(page)) throw new Error('Zhihu requires login or a manual security check.')
+      if (await detectLoginRequired(page)) { revealBrowser(browser); throw new Error('Zhihu requires login or a manual security check.') }
       await waitForDraftStable(page)
     }
     beforeUrl = page.url()
+    await publisherPacing(10_000, 20_000, 'before publish', job.pacingMode)
+    await writePageSnapshot(page, { artifactDir: job.artifactDir, label: '05-before-publish-click', extra: { beforeUrl, mode } })
     responseCapture = observePublishResponses(page)
     await clickPublishAndConfirm(page, beforeUrl, {
       onClickStart: responseCapture.markInteraction,
@@ -1341,14 +1638,18 @@ export async function publishZhihuJob(job, account) {
     })
     responseCapture.stop()
     await writePublishDiagnostics(page, { artifactDir: job.artifactDir, beforeUrl, responses: responseCapture.snapshot() })
+    await writePageSnapshot(page, { artifactDir: job.artifactDir, label: '06-after-publish-click', extra: { published: true, url: page.url() } })
+    await recaptureZhihuSession(page, account)
     pendingJobSessions.delete(job.id)
     keepOpen = false
     return { externalUrl: page.url() }
   } catch (error) {
     responseCapture?.stop()
     await writePublishDiagnostics(page, { artifactDir: job.artifactDir, beforeUrl, errorMessage: error.message, responses: responseCapture?.snapshot() || [] })
+    await writePageSnapshot(page, { artifactDir: job.artifactDir, label: '06-after-publish-error', extra: { error: error.message } })
     logTrace('publish', 'Zhihu publish failed', { accountId: account.id, jobId: job.id, error: error.message })
-    if (strategy.retainSessionOnFailure && page && !page.isClosed()) {
+    revealBrowser(browser)
+    if ((strategy.retainSessionOnFailure || process.env.GEO_PUBLISHER_RUNTIME === 'electron') && page && !page.isClosed()) {
       pendingJobSessions.set(job.id, { browser, page, accountId: account.id })
       keepOpen = true
     }

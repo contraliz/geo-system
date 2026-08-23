@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createPlatformLock } from '../publisher/locks.mjs'
 import { buildChromeLaunchSpec, headlessBrowserExecutablePath, launchBrowser, waitForDevtools } from '../publisher/puppeteer.mjs'
-import { assertEditorWritable, classifyPublishResponse, clickAndFocus, clickPublishAndConfirm, dismissDraftLoadingDialog, editorFieldStateIsValid, getZhihuPublishStrategy, getZhihuPublisherMode, inspectDraftLoadingOverlay, inspectDraftStability, inspectPublishReadiness, isPublished, normalizeEditorText, normalizePublicArticleUrl, pasteWithTrustedInput, prepareZhihuJob, sanitizePublishResponsePayload, selectAllAndClear, selectEditorFieldInfos, summarizePublishDiagnostics, waitForDraftStable, waitForPublishReadiness } from '../publisher/zhihu.mjs'
+import { assertEditorWritable, classifyPublishResponse, clickAndFocus, clickPublishAndConfirm, detectZhihuClientError, dismissDraftLoadingDialog, editorFieldStateIsValid, getZhihuPublishStrategy, getZhihuPublisherMode, inspectDraftLoadingOverlay, inspectDraftStability, inspectPublishReadiness, isPublished, normalizeEditorText, normalizePublicArticleUrl, pasteHtmlWithTrustedInput, pasteWithTrustedInput, prepareZhihuJob, sanitizePublishResponsePayload, selectAllAndClear, selectEditorFieldInfos, summarizePublishDiagnostics, waitForDraftStable, waitForPublishReadiness } from '../publisher/zhihu.mjs'
 import { clearTrace, getTrace, trace, traceSnapshot } from '../publisher/trace.mjs'
 
 test('editor verification rejects visible overlay text when Zhihu state is empty', () => {
@@ -19,6 +19,16 @@ test('visible and background publisher modes remain explicit strategies', () => 
   assert.equal(getZhihuPublisherMode({ mode: 'visible' }), 'visible')
   assert.equal(getZhihuPublisherMode({ mode: 'background' }), 'background')
   assert.throws(() => getZhihuPublisherMode({ mode: 'hidden' }), /unsupported zhihu publisher mode/i)
+})
+
+test('HTML clipboard insertion fails closed without falling back to DOM mutation', async () => {
+  let keyboardPressed = false
+  const page = {
+    evaluate: async () => false,
+    keyboard: { down: async () => {}, press: async () => { keyboardPressed = true }, up: async () => {} },
+  }
+  assert.equal(await pasteHtmlWithTrustedInput(page, '<p>safe</p>', 'safe'), false)
+  assert.equal(keyboardPressed, false)
 })
 
 test('visible strategy may retain inspection sessions while background strategy always cleans up', () => {
@@ -40,6 +50,22 @@ test('HTTP 200 application-level rate limit is an explicit publish failure', () 
   assert.equal(result.applicationError, true)
   assert.equal(result.rateLimited, true)
   assert.match(result.message, /操作频繁/)
+})
+
+test('Zhihu 10001 response maps to an actionable client-upgrade error', () => {
+  const result = classifyPublishResponse({ httpStatus: 200, url: 'https://www.zhihu.com/api/v4/content/publish', payload: { code: 10001, message: '请求参数异常' } })
+  assert.equal(result.applicationError, true)
+  assert.equal(result.errorCode, 'zhihu-client-outdated')
+  assert.match(result.message, /10001|升级客户端/)
+})
+
+test('Zhihu login-page 10001 banner maps to an actionable account error', async () => {
+  const page = { $eval: async () => '10001:请求参数异常，请升级客户端后重试' }
+  assert.deepEqual(await detectZhihuClientError(page), {
+    errorCode: 'zhihu-client-outdated',
+    message: 'Zhihu returned 10001 (请求参数异常). Update the client or reopen the account profile, then try again.',
+  })
+  assert.equal(await detectZhihuClientError({ $eval: async () => '登录知乎' }), null)
 })
 
 test('successful response article ids normalize to public non-edit URLs', () => {

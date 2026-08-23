@@ -2,8 +2,8 @@ import { I18nProvider, translateText, useTranslation } from '../../i18n'
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Archive, ArrowDownRight, ArrowLeft, ArrowUpRight, BarChart3, BookOpen, Bot, BrainCircuit, Check, ChevronDown, ChevronRight,
-  CircleHelp, ClipboardList, Cloud, Cpu, Database, FileCheck2, FileText, FolderKanban, Gauge, Globe2, Image,
-  Info, KeyRound, LayoutDashboard, Library, ListFilter, Menu, Moon, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen,
+  ClipboardList, Cloud, Cpu, Database, ExternalLink, FileCheck2, FileText, FolderKanban, Gauge, Globe2, Image,
+  Info, KeyRound, LayoutDashboard, Library, ListFilter, Moon, MoreHorizontal, Palette,
   PenLine, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Sparkles, Sun, Table2, Tag, Trash2, UserRound,
   Upload, Users, WalletCards, WandSparkles, X, Zap, Eye,
 } from 'lucide-react'
@@ -15,8 +15,8 @@ import type { Route, CreateKind } from '../../types'
 import { ConfirmModal, EmptyState, Kpi, Modal, Toolbar } from '../../shared'
 import { formatDate, uid } from '../../utils'
 import { runAgentForTask, type AgentStatus, fetchAgentStatus } from '../../agent'
-import { PublisherPanel } from '../../PublisherPanel'
-import { navGroups, routeInfo } from '../routes'
+import { AccountsPanel, PublisherPanel, PublishingQueuePanel } from '../../PublisherPanel'
+import { routeInfo } from '../routes'
 import { normalizeState, STORAGE_KEY, usePersistentState } from '../state'
 import { KeywordDistillationPage } from '../../features/keyword-distillation'
 
@@ -32,9 +32,8 @@ function App() {
   const language = state.language
   const t = (value: string) => translateText(value, language)
   const [route, setRoute] = useState<Route>('dashboard')
-  const [mobileOpen, setMobileOpen] = useState(false)
-  const [compact, setCompact] = useState(false)
-  const [collapsed, setCollapsed] = usePersistentState<Record<string, boolean>>('geoflow-nav-groups', {})
+  const [policyVisible, setPolicyVisible] = useState(true)
+  const [languageMenuOpen, setLanguageMenuOpen] = useState(false)
   const [createKind, setCreateKind] = useState<CreateKind>(null)
   const [taskModal, setTaskModal] = useState<{ mode: 'create' | 'duplicate' | 'inspect'; taskId: string | null; instance: string } | null>(null)
   const [instructionModal, setInstructionModal] = useState<{ mode: 'create' | 'inspect'; seed: WritingInstruction | null; instance: string } | null>(null)
@@ -46,7 +45,7 @@ function App() {
 
   useEffect(() => { document.documentElement.dataset.theme = state.theme }, [state.theme])
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2600) }
-  const navigate = (next: Route) => { setRoute(next); setMobileOpen(false) }
+  const navigate = (next: Route) => { setRoute(next) }
   const openKnowledgeBase = (knowledgeBase: KnowledgeBase) => { setKnowledgeBaseId(knowledgeBase.id); setDetail(null); navigate('knowledge-base-detail') }
   const openImageLibrary = (imageLibrary: ImageLibrary) => { setImageLibraryId(imageLibrary.id); setDetail(null); navigate('image-library-detail') }
   const openCreationTask = (task?: CreationTask) => { setTaskModal({ instance: uid('task-modal'), mode: task ? 'duplicate' : 'create', taskId: task?.id || null }); setCreateKind(null) }
@@ -55,18 +54,19 @@ function App() {
   const patch = (next: Partial<AppState>) => setStoredState(current => normalizeState({ ...normalizeState(current), ...next }))
   const toggleTheme = () => patch({ theme: state.theme === 'light' ? 'dark' : 'light' })
   useEffect(() => { document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en'; document.title = language === 'zh' ? 'GEO 运营' : 'GEO Operations' }, [language])
-  const toggleLanguage = () => { const next = language === 'en' ? 'zh' : 'en'; patch({ language: next }) }
   const resetDemo = () => { setStoredState(normalizeState({ ...defaultAppState, language })); setKnowledgeBaseId(null); setRoute('dashboard'); notify(t('Demo data reset to the original local snapshot')) }
 
   const page = routeInfo[route]
-  return <I18nProvider language={language} onLanguageChange={next => patch({ language: next })}><div className="app-shell">
-    <Sidebar active={route} compact={compact} mobileOpen={mobileOpen} collapsed={collapsed} onCompact={() => setCompact(value => !value)} onToggleGroup={(group) => setCollapsed(value => ({ ...value, [group]: !value[group] }))} onNavigate={navigate} onClose={() => setMobileOpen(false)} balance={state.balance} />
+  const publishingRoute = route === 'accounts' || route === 'personal-media'
+  const activeModule = moduleForRoute(route)
+  return <I18nProvider language={language} onLanguageChange={next => patch({ language: next })}><div className={`app-shell ${publishingRoute ? 'publishing-app-shell' : ''}`}>
+    {policyVisible && <PolicyBanner onClose={() => setPolicyVisible(false)} onView={() => notify(t('Publishing policy is available in this local demo'))} />}
     <div className="app-main">
-      <header className="topbar">
-        <button className="icon-button mobile-menu" aria-label={t("Open navigation")} onClick={() => setMobileOpen(true)}><Menu size={19} /></button>
-        <div className="breadcrumbs"><span>{t('Workspace')}</span><ChevronRight size={14} /><strong>{t(page.label)}</strong></div>
-        <div className="topbar-actions"><button className="connection" onClick={() => notify(t('Connection is simulated and local-only'))}><span className="status-dot" /> {t('Local only')} <span className="connection-version">{t("v0.8.4-demo")}</span></button><button className="language-toggle" aria-label={t('Language')} onClick={toggleLanguage}>{language === 'en' ? '简体中文' : 'English'}</button><button className="icon-button" aria-label={t('Toggle theme')} onClick={toggleTheme}>{state.theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button><button className="balance-chip" onClick={() => navigate('compute-points')}><Zap size={14} /> {state.balance.toLocaleString()} <span>{t('points')}</span></button><button className="avatar" aria-label={t('Open user menu')} onClick={() => navigate('settings')}>{t("ET")}</button></div>
+      <header className="topbar app-topbar">
+        <div className="brand-lockup"><div className="brand-mark">G</div><div className="brand-copy"><strong>GEO System</strong><span>{t('GEO operations')}</span></div></div>
+        <div className="topbar-actions"><button className="connection" onClick={() => notify(t('Connection is simulated and local-only'))}><span className="status-dot" /> {t('Local only')} <span className="connection-version">{t("Local only")}</span></button><span className="app-version">v0.8.4-demo</span><div className="language-menu"><button className="language-button" aria-label={t('Language')} aria-expanded={languageMenuOpen} onClick={() => setLanguageMenuOpen(value => !value)}><Globe2 size={16} /><span>{language === 'en' ? 'English' : '简体中文'}</span><ChevronDown size={14} /></button>{languageMenuOpen && <div className="language-popover" role="menu"><button className={language === 'en' ? 'selected' : ''} onClick={() => { patch({ language: 'en' }); setLanguageMenuOpen(false) }} role="menuitem"><span>English</span>{language === 'en' && <Check size={14} />}</button><button className={language === 'zh' ? 'selected' : ''} onClick={() => { patch({ language: 'zh' }); setLanguageMenuOpen(false) }} role="menuitem"><span>简体中文</span>{language === 'zh' && <Check size={14} />}</button></div>}</div><button className="icon-button" aria-label={t('Toggle theme')} onClick={toggleTheme}>{state.theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button><button className="balance-chip" onClick={() => navigate('compute-points')}><Zap size={14} /> {state.balance.toLocaleString()} <span>{t('points')}</span></button><button className="avatar" aria-label={t('Open user menu')} onClick={() => navigate('settings')}>ET</button></div>
       </header>
+      <GlobalSidebar active={route} module={activeModule} onNavigate={navigate} balance={state.balance} />
       <main className="page-wrap">
         <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-mark" /> {t('CONTENT OPERATIONS · SIMULATED')}</div><h1>{t(page.label)}</h1><p className="lede">{t(page.description)}</p></div>{route === 'dashboard' && <button className="button button-primary" onClick={() => notify(t('Report simulation queued locally'))}><RefreshCw size={16} /> {t('Simulate report')}</button>}</div>
         <PageRouter route={route} state={state} patch={patch} navigate={navigate} notify={notify} onCreate={setCreateKind} onCreateTask={openCreationTask} onInspectTask={openInspectTask} onOpenInstruction={openInstructionModal} onDetail={setDetail} onOpenKnowledgeBase={openKnowledgeBase} onOpenImageLibrary={openImageLibrary} selectedKnowledgeBaseId={knowledgeBaseId} selectedImageLibraryId={imageLibraryId} onConfirm={setConfirm} />
@@ -80,14 +80,44 @@ function App() {
   </div></I18nProvider>
 }
 
-function Sidebar({ active, compact, mobileOpen, collapsed, onCompact, onToggleGroup, onNavigate, onClose, balance }: { active: Route; compact: boolean; mobileOpen: boolean; collapsed: Record<string, boolean>; onCompact: () => void; onToggleGroup: (group: string) => void; onNavigate: (route: Route) => void; onClose: () => void; balance: number }) {
+type AppModule = 'overview' | 'content' | 'publishing' | 'validation' | 'settings'
+
+function moduleForRoute(route: Route): AppModule {
+  if (['accounts', 'personal-media', 'records', 'website-media', 'influencers', 'official-seo'].includes(route)) return 'publishing'
+  if (route === 'model-validation') return 'validation'
+  if (['admin', 'settings'].includes(route)) return 'settings'
+  if (['knowledge-bases', 'knowledge-base-detail', 'image-libraries', 'image-library-detail', 'keyword-distillation', 'writing-instructions', 'automatic-creation', 'article-list'].includes(route)) return 'content'
+  return 'overview'
+}
+
+const moduleLabels: Record<AppModule, string> = { overview: 'Overview', content: 'Content', publishing: 'Publishing', validation: 'Validation', settings: 'Settings' }
+const moduleRoutes: Record<AppModule, Array<{ route: Route; label: string; icon: IconType }>> = {
+  overview: [{ route: 'dashboard', label: 'Dashboard', icon: LayoutDashboard }, { route: 'compute-points', label: 'Compute Points', icon: WalletCards }],
+  content: [
+    { route: 'keyword-distillation', label: 'Keyword Distillation', icon: WandSparkles }, { route: 'article-list', label: 'Article List', icon: FileText },
+    { route: 'automatic-creation', label: 'Automatic Creation', icon: BrainCircuit }, { route: 'writing-instructions', label: 'Writing Instructions', icon: PenLine },
+    { route: 'knowledge-bases', label: 'Knowledge Bases', icon: Database }, { route: 'image-libraries', label: 'Image Libraries', icon: Image },
+  ],
+  publishing: [
+    { route: 'accounts', label: 'Media accounts', icon: UserRound }, { route: 'personal-media', label: 'Publishing queue', icon: ClipboardList },
+    { route: 'records', label: 'Records', icon: FileCheck2 }, { route: 'website-media', label: 'Website Media', icon: Globe2 },
+    { route: 'influencers', label: 'Influencers', icon: Users }, { route: 'official-seo', label: 'Official-site SEO', icon: Search },
+  ],
+  validation: [{ route: 'model-validation', label: 'Model Validation', icon: ShieldCheck }],
+  settings: [{ route: 'settings', label: 'About & Settings', icon: Settings2 }, { route: 'admin', label: 'Admin Overview', icon: Gauge }],
+}
+
+function PolicyBanner({ onClose, onView }: { onClose: () => void; onView: () => void }) {
   const { t: tr } = useTranslation()
-  return <><aside className={`sidebar ${compact ? 'sidebar-compact' : ''} ${mobileOpen ? 'sidebar-mobile-open' : ''}`}>
-    <div className="brand-lockup"><div className="brand-mark">{tr("G")}</div><div className="brand-copy"><strong>{tr("Workspace")}</strong><span>{tr("GEO operations")}</span></div><button className="icon-button sidebar-close mobile-only" aria-label={tr("Close navigation")} onClick={onClose}><X size={17} /></button></div>
-    <button className="workspace-switcher" onClick={() => onNavigate('settings')}><span className="workspace-avatar">{tr("G")}</span><span className="workspace-copy"><strong>{tr("Workspace")}</strong><small>{tr("example.local")}</small></span><ChevronDown size={15} /></button>
-    <div className="sidebar-nav">{navGroups.map(group => <div className="nav-group" key={group.label}><button className="nav-group-heading" onClick={() => onToggleGroup(group.label)}><span>{tr(group.label)}</span>{!compact && (collapsed[group.label] ? <ChevronRight size={13} /> : <ChevronDown size={13} />)}</button>{!collapsed[group.label] && group.items.map(item => <button key={item.route} className={`nav-item ${active === item.route ? 'active' : ''}`} title={compact ? tr(item.label) : undefined} onClick={() => onNavigate(item.route)}><item.icon size={17} /><span>{tr(item.label)}</span>{item.badge && !compact && <em>{item.badge}</em>}</button>)}</div>)}</div>
-    <div className="sidebar-spacer" /><div className="points-card"><div className="points-icon"><Zap size={14} /></div><div><strong>{balance.toLocaleString()}</strong><span>{tr("compute points")}</span></div><ArrowUpRight size={14} /></div><button className="collapse-button" onClick={onCompact}>{compact ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}<span>{tr(compact ? 'Expand sidebar' : 'Collapse sidebar')}</span></button><div className="sidebar-footer"><span>{tr("LOCAL DEMO · v0.8.4")}</span><CircleHelp size={14} /></div>
-  </aside>{mobileOpen && <button className="nav-scrim" aria-label={tr("Close navigation")} onClick={onClose} />}</>
+  return <div className="policy-banner"><ShieldCheck size={16} /><span>{tr('Ensure you have the right to publish content on external platforms. Do not publish illegal, misleading, or infringing content.')}</span><button className="policy-link" onClick={onView}>{tr('View policy')} <ExternalLink size={14} /></button><button className="policy-close" aria-label={tr('Close policy notice')} onClick={onClose}><X size={16} /></button></div>
+}
+
+function GlobalSidebar({ active, module, onNavigate, balance }: { active: Route; module: AppModule; onNavigate: (route: Route) => void; balance: number }) {
+  const { t: tr } = useTranslation()
+  const firstRoute: Record<AppModule, Route> = { overview: 'dashboard', content: 'article-list', publishing: 'accounts', validation: 'model-validation', settings: 'settings' }
+  const moduleIcon = (value: AppModule) => value === 'publishing' ? <Cloud size={17} /> : value === 'content' ? <FileText size={17} /> : value === 'validation' ? <ShieldCheck size={17} /> : value === 'settings' ? <Settings2 size={17} /> : <LayoutDashboard size={17} />
+  const isSelected = (route: Route) => route === active || (route === 'knowledge-bases' && active === 'knowledge-base-detail') || (route === 'image-libraries' && active === 'image-library-detail')
+  return <aside className="context-rail global-sidebar" aria-label={tr('Global navigation')}><div className="context-rail-brand"><span className="context-rail-icon"><span className="brand-mark-sidebar">G</span></span><strong>GEO System</strong></div><nav className="global-sidebar-list">{(Object.keys(moduleLabels) as AppModule[]).map(value => <section className={`sidebar-module ${module === value ? 'active' : ''}`} key={value}><button className={`sidebar-module-heading ${module === value ? 'active' : ''}`} onClick={() => onNavigate(firstRoute[value])}><span className="sidebar-module-icon">{moduleIcon(value)}</span><span>{tr(moduleLabels[value])}</span></button><div className="sidebar-module-items">{moduleRoutes[value].map(item => { const ItemIcon = item.icon; return <button key={item.route} className={`context-rail-item ${isSelected(item.route) ? 'active' : ''}`} onClick={() => onNavigate(item.route)}><ItemIcon size={16} /><span>{tr(item.label)}</span>{item.route === 'automatic-creation' && <b>3</b>}</button> })}</div></section>)}</nav><div className="context-rail-spacer" /><button className="context-rail-balance" onClick={() => onNavigate('compute-points')}><Zap size={15} /><span><strong>{balance.toLocaleString()}</strong><small>{tr('compute points')}</small></span><ArrowUpRight size={14} /></button><button className="context-rail-manage" onClick={() => onNavigate('settings')}><Settings2 size={16} />{tr('Manage workspace')}</button></aside>
 }
 
 function DashboardFallback() { const { t: tr } = useTranslation(); return <div className="content-stack"><section className="card"><div className="card-header"><div><h2>{tr("Loading dashboard…")}</h2><p>{tr("Recharts and the dashboard module are being loaded locally.")}</p></div></div><div className="kpi-grid"><div className="card kpi-card cobalt"><div className="kpi-top"><span>{tr("Keyword coverage")}</span></div><strong className="kpi-value">—</strong></div><div className="card kpi-card cyan"><div className="kpi-top"><span>{tr("Content output")}</span></div><strong className="kpi-value">—</strong></div><div className="card kpi-card green"><div className="kpi-top"><span>{tr("Brand mentions")}</span></div><strong className="kpi-value">—</strong></div><div className="card kpi-card violet"><div className="kpi-top"><span>{tr("Model calls")}</span></div><strong className="kpi-value">—</strong></div></div></section></div> }
@@ -101,12 +131,13 @@ function PageRouter({ route, state, patch, navigate, notify, onCreate, onCreateT
   if (route === 'writing-instructions') return <InstructionsPage state={state} patch={patch} notify={notify} onCreate={() => onOpenInstruction('create', null)} onInspect={(item) => onOpenInstruction('inspect', item)} />
   if (route === 'automatic-creation') return <CreationPage state={state} onCreate={() => onCreateTask()} onCreateTask={onCreateTask} onInspectTask={onInspectTask} patch={patch} navigate={navigate} notify={notify} onConfirm={onConfirm} />
   if (route === 'article-list') return <ArticlePage state={state} onDetail={onDetail} />
-  if (route === 'personal-media') return <PublishingPage state={state} patch={patch} onCreate={() => onCreate('publishing')} onConfirm={onConfirm} notify={notify} />
+  if (route === 'personal-media') return <PublishingQueuePanel articles={state.articles} notify={notify} />
   if (route === 'model-validation') return <ValidationPage2 state={state} patch={patch} notify={notify} />
   if (route === 'compute-points') return <PointsPage state={state} patch={patch} notify={notify} />
   if (route === 'admin') return <AdminPage2 state={state} patch={patch} notify={notify} />
   if (route === 'settings') return <SettingsPage state={state} patch={patch} notify={notify} />
-  if (['records', 'accounts', 'website-media', 'influencers', 'official-seo'].includes(route)) return <OperationsPage route={route} state={state} patch={patch} notify={notify} />
+  if (route === 'accounts') return <AccountsPanel notify={notify} />
+  if (['records', 'website-media', 'influencers', 'official-seo'].includes(route)) return <OperationsPage route={route} state={state} patch={patch} notify={notify} />
   return <InfoPage route={route} navigate={navigate} />
 }
 

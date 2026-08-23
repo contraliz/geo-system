@@ -2,7 +2,11 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { trace as logTrace } from './trace.mjs'
+import { resolveElectronExecutable } from './electron-auth.mjs'
+
+const electronPublisherChild = new URL('./electron-publisher-child.mjs', import.meta.url)
 
 let cachedModule
 
@@ -139,7 +143,10 @@ async function waitForBrowserReady(browser, timeoutMs = 30_000) {
   throw new Error('Chrome did not become ready after launch.')
 }
 
-export async function launchBrowser(puppeteer, { headless, userDataDir, executablePath, headlessExecutablePath = null }) {
+export async function launchBrowser(puppeteer, { headless, userDataDir, executablePath, headlessExecutablePath = null, accountId = '', platform = 'zhihu', visible = !headless }) {
+  if (process.env.GEO_PUBLISHER_RUNTIME === 'electron') {
+    return launchElectronBrowser(puppeteer, { userDataDir, accountId, platform, visible })
+  }
   const headlessExecutable = headless ? (headlessExecutablePath || headlessBrowserExecutablePath()) : null
   if (headless && !headlessExecutable && macAppBundlePath(executablePath)) {
     throw new Error('Background publishing requires Playwright Chromium headless shell. Run `npx playwright install chromium --only-shell` or set GEO_HEADLESS_CHROME_EXECUTABLE.')
@@ -200,6 +207,41 @@ export async function launchBrowser(puppeteer, { headless, userDataDir, executab
     logTrace('puppeteer-debug-error', 'Failed to launch Chrome via LaunchServices', { error: error.message })
     throw error
   }
+}
+
+export async function launchElectronBrowser(puppeteer, { userDataDir, accountId = '', platform = 'zhihu', visible = false, timeoutMs = 30_000 } = {}) {
+  const executable = await resolveElectronExecutable()
+  if (!executable) throw new Error('Electron publishing is unavailable. Install the Electron runtime (`npm install`) or set GEO_ELECTRON_PATH, then retry.')
+  const profileDir = path.resolve(String(userDataDir || ''))
+  if (!userDataDir || profileDir === path.parse(profileDir).root) throw new Error('The publisher profile path is invalid.')
+  const port = await freePort()
+  const partition = `persist:geo-${String(platform).replace(/[^a-z0-9_-]/gi, '')}-${String(accountId || 'publisher').replace(/[^a-z0-9_-]/gi, '')}`
+  const childEnv = { ...process.env, GEO_ELECTRON_PUBLISH_CONFIG: JSON.stringify({ profileDir, accountId, platform, partition, port, visible: Boolean(visible) }) }
+  delete childEnv.ELECTRON_RUN_AS_NODE
+  const child = spawn(executable, [fileURLToPath(electronPublisherChild)], { env: childEnv, stdio: ['pipe', 'ignore', 'pipe'], windowsHide: false })
+  child.stderr.on('data', () => {})
+  let browser = null
+  try {
+    const endpoint = await waitForDevtools(port, timeoutMs)
+    browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${endpoint.port || port}` })
+    await waitForBrowserReady(browser, timeoutMs)
+    browser.show = () => { try { child.stdin.write('show\n') } catch {} }
+    browser.hide = () => { try { child.stdin.write('hide\n') } catch {} }
+    const close = browser.close.bind(browser)
+    browser.close = async () => {
+      try { await close() } finally { try { child.stdin.write('quit\n') } catch {}; setTimeout(() => { if (!child.killed) child.kill() }, 2_000).unref?.() }
+    }
+    browser.showWindow = browser.show
+    return browser
+  } catch (error) {
+    if (browser) await browser.close().catch(() => {})
+    if (!child.killed) child.kill()
+    throw error
+  }
+}
+
+export function revealBrowser(browser) {
+  try { browser?.show?.() } catch {}
 }
 
 export function buildChromeLaunchSpec({ appPath, userDataDir, port, background = false }) {

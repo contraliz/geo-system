@@ -2,6 +2,10 @@
 
 This is a neutral, local-only content operations SPA for exploring the path from question discovery and approved knowledge through AI writing, model validation, review, and owned-channel publishing configuration.
 
+## Project documentation
+
+The source of truth is the Obsidian vault in [`docs/`](docs/README.md). Start with [`docs/Home.md`](docs/Home.md). Architecture, current implementation status, decisions, operating procedures, and unresolved verification work belong there.
+
 ## Local setup
 
 ```bash

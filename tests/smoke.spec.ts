@@ -30,12 +30,15 @@ test.describe('GEO operations smoke harness', () => {
     await expect(page.getByText(/v0\.8\.4/).first()).toBeVisible()
   })
 
-  test('language toggle switches UI strings to Chinese and back', async ({ page }) => {
+  test('language dropdown switches UI strings to Chinese and back', async ({ page }) => {
     await gotoFresh(page)
     await expect(page.getByRole('heading', { level: 2, name: /Run the question-to-validation flow/i })).toBeVisible()
-    await page.locator('.language-toggle').click()
+    await page.getByRole('button', { name: 'Language' }).click()
+    await expect(page.getByRole('menu')).toBeVisible()
+    await page.getByRole('menuitem', { name: '简体中文' }).click()
     await expect(page.getByRole('heading', { level: 2, name: /运行从问题到验证的流程/ })).toBeVisible()
-    await page.locator('.language-toggle').click()
+    await page.getByRole('button', { name: '语言' }).click()
+    await page.getByRole('menuitem', { name: 'English' }).click()
     await expect(page.getByRole('heading', { level: 2, name: /Run the question-to-validation flow/i })).toBeVisible()
   })
 

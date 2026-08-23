@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Account authorization</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-width: 0; min-height: 0; width: 100%; height: 100%; background: #f7f9fc; color: #16233b; }
+    body { position: relative; display: grid; grid-template-rows: 64px minmax(0, 1fr); }
+    header { position: relative; z-index: 3; grid-row: 1; min-width: 0; height: 64px; display: flex; align-items: center; gap: 16px; padding: 0 22px; background: #fff; border-bottom: 1px solid #dce4ef; box-shadow: 0 1px 6px #13294b12; }
+    .mark { width: 30px; height: 30px; border-radius: 9px; background: #1769f5; color: #fff; display: grid; place-items: center; font-weight: 700; }
+    .title { flex: 1; min-width: 0; font-weight: 650; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hint { min-width: 0; overflow: hidden; color: #6f7d91; font-size: 12px; margin-right: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .button { flex: 0 0 auto; border: 0; border-radius: 8px; padding: 10px 17px; color: #fff; background: #1769f5; font-weight: 650; cursor: pointer; }
+    .button:hover { background: #0754d9; }
+    .button:focus-visible { outline: 3px solid #9bc0ff; outline-offset: 2px; }
+    #platform { position: relative; z-index: 1; grid-row: 2; display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; border: 0; background: #fff; }
+    #platform-state { position: absolute; left: 50%; top: calc(50% + 32px); z-index: 2; pointer-events: none; transform: translate(-50%, -50%); max-width: 520px; padding: 14px 18px; border: 1px solid #d7e1ee; border-radius: 10px; background: #fff; color: #53647a; box-shadow: 0 8px 30px #13294b18; text-align: center; }
+    #platform-state.error { color: #a52c36; border-color: #f1b9bf; background: #fff7f7; }
+    #platform-state[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="mark" aria-hidden="true">G</div>
+    <div id="title" class="title">Account authorization / 账号授权</div>
+    <div class="hint">Complete login in the secure account window</div>
+    <button id="finish" class="button" type="button">Confirm logged in / 确认已登录</button>
+  </header>
+  <webview id="platform" allowpopups="false" webpreferences="contextIsolation=yes,sandbox=yes,spellcheck=no"></webview>
+  <div id="platform-state">Loading secure login page… / 正在加载安全登录页面…</div>
+  <script>
+    const query = new URLSearchParams(window.location.search);
+    const platform = document.getElementById('platform');
+    const partition = query.get('partition');
+    if (partition) platform.setAttribute('partition', partition);
+    const initialUrl = query.get('initialUrl');
+    if (/^https?:\/\//i.test(initialUrl || '')) platform.setAttribute('src', initialUrl);
+    const title = query.get('title');
+    if (title) {
+      document.title = title;
+      document.getElementById('title').textContent = title;
+    }
+    const state = document.getElementById('platform-state');
+    window.geoAuthToolbar = {
+      setState(message, isError) {
+        state.textContent = message;
+        state.classList.toggle('error', Boolean(isError));
+        state.hidden = !message;
+      },
+    };
+    platform.addEventListener('did-start-loading', () => window.geoAuthToolbar.setState('Loading secure login page… / 正在加载安全登录页面…', false));
+    platform.addEventListener('did-stop-loading', () => window.geoAuthToolbar.setState('', false));
+    platform.addEventListener('did-fail-load', event => {
+      if (!event.isMainFrame) return;
+      window.geoAuthToolbar.setState(`The platform page could not load (error ${event.errorCode}). Check your connection and retry. / 平台页面加载失败（错误 ${event.errorCode}）。`, true);
+    });
+    platform.addEventListener('render-process-gone', event => window.geoAuthToolbar.setState(`The platform page stopped unexpectedly (${event.reason}). Reopen authorization to retry. / 平台页面意外停止，请重新授权。`, true));
+    document.getElementById('finish').addEventListener('click', () => {
+      const button = document.getElementById('finish');
+      button.disabled = true;
+      button.textContent = 'Saving session… / 正在保存…';
+      if (window.geoAuthWindow) window.geoAuthWindow.finishAuthorization();
+    });
+    if (window.geoAuthWindow) window.geoAuthWindow.webviewReady();
+  </script>
+</body>
+</html>

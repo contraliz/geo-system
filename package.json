@@ -4,15 +4,17 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "dev:full": "concurrently --kill-others-on-fail -n vite,proxy,publisher -c blue,magenta,green \"vite\" \"node --env-file-if-exists=.env server/proxy.mjs\" \"node --env-file-if-exists=.env publisher/server.mjs\"",
-    "proxy": "node --env-file-if-exists=.env server/proxy.mjs",
-    "publisher": "node --env-file-if-exists=.env publisher/server.mjs",
+    "dev": "node --no-maglev node_modules/vite/bin/vite.js",
+    "dev:full": "concurrently --kill-others-on-fail -n vite,proxy,publisher -c blue,magenta,green \"node --no-maglev node_modules/vite/bin/vite.js\" \"node --no-maglev --env-file-if-exists=.env server/proxy.mjs\" \"node --no-maglev --env-file-if-exists=.env publisher/server.mjs\"",
+    "desktop": "electron desktop/main.mjs",
+    "desktop:dev": "concurrently --kill-others-on-fail -n vite,proxy,desktop -c blue,magenta,green \"node --no-maglev node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173 --strictPort\" \"node --no-maglev --env-file-if-exists=.env server/proxy.mjs\" \"electron desktop/main.mjs --dev\"",
+    "proxy": "node --no-maglev --env-file-if-exists=.env server/proxy.mjs",
+    "publisher": "node --no-maglev --env-file-if-exists=.env publisher/server.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test:smoke": "node tests/fixtures/make-png.cjs && playwright test",
     "test:smoke:install": "playwright install chromium",
-    "test:unit": "node --test tests/publisher-vault.test.mjs tests/publisher-runtime.test.mjs"
+    "test:unit": "node --test tests/publisher-vault.test.mjs tests/publisher-session.test.mjs tests/publisher-runtime.test.mjs tests/publisher-store.test.mjs tests/publisher-common.test.mjs tests/electron-auth.test.mjs tests/desktop-readiness.test.mjs tests/desktop-auth-server.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
@@ -22,13 +24,14 @@
     "react-dom": "19.2.8",
     "recharts": "3.10.1",
     "vite": "8.2.1",
-    "puppeteer-core": "^24.16.0"
+    "puppeteer-core": "^25.8.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "concurrently": "^10.0.5",
+    "electron": "^43.4.1",
     "typescript": "7.0.2"
   }
 }

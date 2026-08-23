@@ -1,107 +1,114 @@
-import { useEffect, useState } from 'react'
-import { Check, ExternalLink, LoaderCircle, Play, Plus, ShieldCheck, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { Check, CircleAlert, Clock3, ExternalLink, Eye, LoaderCircle, Pencil, Play, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2, UserRound, X } from 'lucide-react'
 import type { Article } from './data'
+import { publisherApi, accountStatusLabel, jobStatusLabel, mapPublisherError, type PublisherAccount, type PublisherJob, type PublisherPlatform } from './publisher/client'
 
-type Account = { id: string; label: string; platform: string; mode: 'background' | 'visible'; status: string; lastError?: string | null }
-type Job = { id: string; title: string; status: string; error?: string | null; externalUrl?: string | null }
+type Notice = (message: string) => void
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...init })
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`)
-  return payload as T
-}
+type DesktopAuthorizationResult = { ok: boolean; status?: string; message?: string; error?: string }
 
-export function PublisherPanel({ articles, notify }: { articles: Article[]; notify: (message: string) => void }) {
-  const [accounts, setAccounts] = useState<Account[]>([])
-  const [jobs, setJobs] = useState<Job[]>([])
-  const [label, setLabel] = useState('Zhihu editorial account')
-  const [cookieJson, setCookieJson] = useState('')
-  const [selectedArticleId, setSelectedArticleId] = useState(articles[0]?.id || '')
-  const [selectedAccountId, setSelectedAccountId] = useState('')
-  const [showBrowser, setShowBrowser] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-
-  const refresh = async () => {
-    try {
-      const [accountPayload, jobPayload] = await Promise.all([
-        request<{ accounts: Account[] }>('/api/publisher/accounts'),
-        request<{ jobs: Job[] }>('/api/publisher/jobs'),
-      ])
-      setAccounts(accountPayload.accounts)
-      setJobs(jobPayload.jobs)
-      setSelectedAccountId(accountPayload.accounts[0]?.id || '')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Publisher service is unavailable')
+declare global {
+  interface Window {
+    geoDesktop?: {
+      isDesktop: boolean
+      openAuthWindow: (input: { accountId: string; platform: string }) => Promise<DesktopAuthorizationResult>
     }
   }
-
-  useEffect(() => { void refresh() }, [])
-
-  const connect = async () => {
-    setLoading(true); setError('')
-    try {
-      const payload = await request<{ account: Account }>('/api/publisher/accounts/prepare', { method: 'POST', body: JSON.stringify({ platform: 'zhihu', label, mode: 'visible', visible: true }) })
-      setSelectedAccountId(payload.account.id)
-      notify('Account configured. Finish login, then click Verify account.')
-      await refresh()
-    } catch (err) { setError(err instanceof Error ? err.message : 'Could not start account setup') }
-    finally { setLoading(false) }
-  }
-
-  const prepare = async () => {
-    const article = articles.find(item => item.id === selectedArticleId)
-    if (!article || !selectedAccountId) return
-    setLoading(true); setError('')
-    try {
-      await request(`/api/publisher/accounts/${selectedAccountId}/mode`, { method: 'POST', body: JSON.stringify({ mode: showBrowser ? 'visible' : 'background' }) })
-      await request('/api/publisher/jobs', { method: 'POST', body: JSON.stringify({ accountId: selectedAccountId, title: article.title, content: article.body || `${article.title}\n\nThis local draft was prepared from the ${article.keyword} article record.`, imagePaths: [] }) })
-      notify('Zhihu draft preparation started')
-      await refresh()
-    } catch (err) { setError(err instanceof Error ? err.message : 'Could not create publishing job') }
-    finally { setLoading(false) }
-  }
-
-  const verify = async () => {
-    if (!selectedAccountId) return
-    setLoading(true); setError('')
-    try { const result = await request<{ message: string }>(`/api/publisher/accounts/${selectedAccountId}/verify`, { method: 'POST' }); notify(result.message); await refresh() }
-    catch (err) { setError(err instanceof Error ? err.message : 'Could not verify account') }
-    finally { setLoading(false) }
-  }
-
-  const connectWithCookies = async () => {
-    setLoading(true); setError('')
-    try {
-      const parsed = JSON.parse(cookieJson)
-      const payload = await request<{ account: Account }>('/api/publisher/accounts/cookies', { method: 'POST', body: JSON.stringify({ platform: 'zhihu', label, cookies: parsed }) })
-      setSelectedAccountId(payload.account.id); setCookieJson(''); notify('Cookies saved. Click Verify account to test the session.'); await refresh()
-    } catch (err) { setError(err instanceof Error ? err.message : 'Cookie JSON is invalid or could not be saved') }
-    finally { setLoading(false) }
-  }
-
-  const approve = async (job: Job) => {
-    setLoading(true); setError('')
-    try { await request(`/api/publisher/jobs/${job.id}/approve`, { method: 'POST' }); notify('Publishing approval sent to the local worker'); await refresh() }
-    catch (err) { setError(err instanceof Error ? err.message : 'Could not approve publishing') }
-    finally { setLoading(false) }
-  }
-
-  const closeDebugBrowser = async (job: Job) => {
-    setLoading(true); setError('')
-    try { await request(`/api/publisher/jobs/${job.id}/cancel`, { method: 'POST' }); notify('Closed the retained debug browser'); await refresh() }
-    catch (err) { setError(err instanceof Error ? err.message : 'Could not close the debug browser') }
-    finally { setLoading(false) }
-  }
-
-  return <section className="card publisher-panel">
-    <div className="table-toolbar"><div><div className="eyebrow"><ShieldCheck size={13} /> LOCAL PUBLISHER</div><h2>Zhihu publishing</h2><p className="toolbar-subtitle">Connect once in a visible browser, then prepare future jobs in the background when the saved session is valid.</p></div><span className="simulated-label"><span className="status-dot" /> Approval required</span></div>
-    <div className="publisher-grid">
-      <div className="publisher-setup"><h3>Account setup</h3><p className="muted-copy">Only one Zhihu account is stored. A new manual login or cookie import replaces the current configuration. Verification never starts automatically.</p><div className="publisher-form-row"><input aria-label="Zhihu account label" value={label} onChange={event => setLabel(event.target.value)} placeholder="Account label" /><button className="button button-outline" disabled={loading || !label.trim()} onClick={() => void connect()}><Plus size={14} /> Configure manual login</button></div><label className="publisher-field">Cookie JSON (advanced)<textarea className="publisher-cookie-input" aria-label="Zhihu cookie JSON" value={cookieJson} onChange={event => setCookieJson(event.target.value)} placeholder="Paste a browser cookie export JSON array" rows={3} /></label><button className="button button-soft" disabled={loading || !label.trim() || !cookieJson.trim()} onClick={() => void connectWithCookies()}><ShieldCheck size={14} /> Configure cookie session</button>{accounts[0] && <div className="publisher-account-summary"><strong>{accounts[0].label}</strong><span className={`status-pill ${accounts[0].status}`}>{accounts[0].status}</span><small>New setup replaces this account.</small></div>}{accounts[0]?.status === 'login-required' && <button className="button button-outline publisher-verify" disabled={loading} onClick={() => void verify()}><ShieldCheck size={14} /> Verify account</button>}</div>
-      <div className="publisher-setup"><h3>Prepare an article</h3><p className="muted-copy">Preparation opens the editor, fills the draft, and stops before publishing.</p><label className="publisher-field">Article<select value={selectedArticleId} onChange={event => setSelectedArticleId(event.target.value)}>{articles.map(article => <option value={article.id} key={article.id}>{article.title}</option>)}</select></label><label className="publisher-debug-toggle"><input type="checkbox" checked={showBrowser} onChange={event => setShowBrowser(event.target.checked)} /> <span><strong>Show Chrome window</strong><small>Debug mode: display the browser during preparation and publishing.</small></span></label><button className="button button-primary" disabled={loading || !selectedAccountId || !selectedArticleId} onClick={() => void prepare()}><Play size={14} /> Prepare draft</button></div>
-    </div>
-    {error && <div className="publisher-error"><X size={14} /> {error}</div>}
-    <div className="publisher-jobs"><div className="section-row"><div><h3>Publishing jobs</h3><p className="muted-copy">The final publish action is never automatic until you approve it.</p></div><button className="text-button" onClick={() => void refresh()}><LoaderCircle size={13} /> Refresh</button></div>{jobs.length === 0 ? <p className="empty-inline">No local publishing jobs yet.</p> : <div className="publisher-job-list">{jobs.slice(0, 5).map(job => <div className="publisher-job" key={job.id}><div><strong>{job.title}</strong><span className={`status-pill ${job.status}`}>{job.status}</span>{job.error && <small>{job.error}</small>}</div><div className="publisher-job-actions">{(job.status === 'awaiting-approval' || job.status === 'draft-saved') && <button className="button button-primary compact-button" disabled={loading} onClick={() => void approve(job)}><Check size={13} /> Approve & publish</button>}{job.status === 'failed-inspection' && <button className="button button-outline compact-button" disabled={loading} onClick={() => void closeDebugBrowser(job)}><X size={13} /> Close debug browser</button>}{job.externalUrl && <a className="text-button" href={job.externalUrl} target="_blank" rel="noreferrer"><ExternalLink size={13} /> Open result</a>}</div></div>)}</div>}</div>
-  </section>
 }
+
+function PlatformMark({ platform, size = 'normal' }: { platform: string; size?: 'normal' | 'small' }) {
+  return <span className={`platform-mark ${size === 'small' ? 'platform-mark-small' : ''} platform-${platform}`}>{platform === 'zhihu' ? '知' : platform.slice(0, 1).toUpperCase()}</span>
+}
+
+function formatUpdated(value?: string | null) {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function statusTone(value: string) {
+  if (['ready', 'published', 'connected'].includes(value)) return 'active'
+  if (['error', 'failed', 'cancelled', 'login-required', 'disconnected'].includes(value)) return 'danger'
+  if (['awaiting-approval', 'publishing'].includes(value)) return 'review'
+  return 'draft'
+}
+
+export function AccountsPanel({ notify }: { notify: Notice }) {
+  const [accounts, setAccounts] = useState<PublisherAccount[]>([])
+  const [platforms, setPlatforms] = useState<PublisherPlatform[]>([])
+  const [selectedPlatform, setSelectedPlatform] = useState('all')
+  const [accountLabel, setAccountLabel] = useState('')
+  const [importLabel, setImportLabel] = useState('')
+  const accountLabelInputRef = useRef<HTMLInputElement>(null)
+  const [accountLabelError, setAccountLabelError] = useState('')
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingLabel, setEditingLabel] = useState('')
+  const [showConnect, setShowConnect] = useState(false)
+  const [showImport, setShowImport] = useState(false)
+  const [cookieJson, setCookieJson] = useState('')
+  const [importAccountId, setImportAccountId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const selectedMeta = selectedPlatform === 'all' ? null : platforms.find(platform => platform.id === selectedPlatform) || null
+  const refresh = async () => { try { const [accountPayload, platformPayload] = await Promise.all([publisherApi.listAccounts(), publisherApi.listPlatforms()]); setAccounts(accountPayload.accounts); setPlatforms(platformPayload.platforms); setError('') } catch (err) { setError(err instanceof Error ? err.message : 'Publisher service unavailable') } }
+  useEffect(() => { void refresh() }, [])
+  useEffect(() => { if (!accounts.some(account => account.status === 'login-required')) return; const timer = window.setInterval(() => void refresh(), 3000); return () => window.clearInterval(timer) }, [accounts])
+  const filtered = accounts.filter(account => (selectedPlatform === 'all' || account.platform === selectedPlatform) && `${account.label} ${account.platform}`.toLowerCase().includes(search.toLowerCase()) && (statusFilter === 'all' || account.status === statusFilter))
+  const connect = async () => { if (!accountLabel.trim() || !selectedMeta?.authSupported) return; setBusy(true); setError(''); try { const desktopManaged = Boolean(window.geoDesktop?.isDesktop); if (!desktopManaged || !window.geoDesktop) throw new Error('Account connection requires the GEO desktop app. Start npm run desktop:dev and connect the account there.'); const result = await publisherApi.connect(selectedMeta.id, accountLabel.trim(), true); const authorization = await window.geoDesktop.openAuthWindow({ accountId: result.account.id, platform: result.account.platform }); if (!authorization.ok || authorization.status === 'error') throw new Error(authorization.error || authorization.message || 'Account authorization failed.'); notify(authorization.message || 'Account authorization completed.'); setAccountLabel(''); setAccountLabelError(''); setShowConnect(false); await refresh() } catch (err) { setError(mapPublisherError(err instanceof Error ? err.message : 'Could not start account connection')) } finally { setBusy(false) } }
+  const submitConnection = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!accountLabel.trim()) { setAccountLabelError('Enter an account name before starting authorization.'); accountLabelInputRef.current?.focus(); return } void connect() }
+  const importCookies = async () => { if ((!importLabel.trim() && !importAccountId) || !cookieJson.trim() || !selectedMeta?.authSupported) return; setBusy(true); setError(''); try { const result = await publisherApi.importCookies(selectedMeta.id, importLabel.trim(), JSON.parse(cookieJson), importAccountId || undefined); setImportLabel(''); setCookieJson(''); setImportAccountId(''); setShowImport(false); notify(result.message); await refresh() } catch (err) { setError(err instanceof Error ? err.message : 'Cookie import failed') } finally { setBusy(false) } }
+  const runAccountAction = async (action: () => Promise<unknown>, success: string) => { setBusy(true); setError(''); try { const result = await action() as { status?: string; message?: string; desktopAuthorization?: boolean; account?: PublisherAccount }; if (result?.status === 'error') throw new Error(result.message || 'Account action failed.'); if (result.desktopAuthorization && result.account && window.geoDesktop) { const authorization = await window.geoDesktop.openAuthWindow({ accountId: result.account.id, platform: result.account.platform }); if (!authorization.ok || authorization.status === 'error') throw new Error(authorization.error || authorization.message || 'Account reauthorization failed.'); notify(authorization.message || success); } else notify(success); await refresh() } catch (err) { setError(mapPublisherError(err instanceof Error ? err.message : 'Account action failed')) } finally { setBusy(false) } }
+  const finishRename = async (account: PublisherAccount) => { if (!editingLabel.trim()) return; setBusy(true); setError(''); try { await publisherApi.rename(account.id, editingLabel.trim()); setEditingId(null); setEditingLabel(''); notify('Account renamed'); await refresh() } catch (err) { setError(mapPublisherError(err instanceof Error ? err.message : 'Account rename failed')) } finally { setBusy(false) } }
+  const heading = selectedPlatform === 'all' ? 'All media accounts' : selectedMeta?.name || selectedPlatform
+  const platformAccounts = selectedPlatform === 'all' ? [] : accounts.filter(account => account.platform === selectedPlatform)
+  return <div className="publishing-surface accounts-surface">
+    <div className="publishing-context-rail"><div className="context-rail-heading"><span className="context-rail-icon"><ShieldCheck size={17} /></span><strong>Platforms</strong></div><button className={`context-platform ${selectedPlatform === 'all' ? 'selected' : ''}`} onClick={() => setSelectedPlatform('all')}><span className="context-platform-stack"><span className="platform-layers">≋</span><span>All platforms</span></span><b>{accounts.length}</b></button>{platforms.map(platform => <button className={`context-platform ${selectedPlatform === platform.id ? 'selected' : ''} ${platform.authSupported ? '' : 'unavailable'}`} key={platform.id} disabled={!platform.authSupported} onClick={() => setSelectedPlatform(platform.id)}><span className="context-platform-stack"><PlatformMark platform={platform.id} size="small" /><span>{platform.nameZh}</span></span>{platform.authSupported ? <small>{platform.publishingSupported ? 'Publishing ready' : 'Account login'}</small> : <small>Unavailable</small>}</button>)}</div>
+    <section className="publishing-main-panel"><div className="publishing-heading-row"><div><h2>{heading}</h2><p>{selectedPlatform === 'all' ? 'Select a platform to connect or import an account.' : selectedMeta?.publishingSupported ? 'Connect and manage the browser sessions used by your publishing workers.' : 'Connect and manage a local browser session. Publishing support is not implemented for this platform yet.'}</p>{selectedMeta && !selectedMeta.selectorsValidated && <small className="table-subtitle">Login selectors are unvalidated; review the account after authorization.</small>}</div><div className="row-actions"><button className="button button-outline" disabled={!selectedMeta?.authSupported} title={!selectedMeta ? 'Select a platform first' : undefined} onClick={() => setShowImport(value => !value)}>Import cookie data</button><button className="button button-primary" disabled={!selectedMeta?.authSupported} title={!selectedMeta ? 'Select a platform first' : undefined} onClick={() => setShowConnect(value => !value)}><Plus size={15} /> Connect account</button></div></div>
+      {showConnect && <div className="account-connect-panel"><div><strong>Connect a {selectedMeta?.name || 'platform'} account</strong><p>Electron will open an isolated authorization window. Finish login there and click Confirm logged in; credentials and session data stay local.</p></div><form className="account-connect-form" onSubmit={submitConnection} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}><label htmlFor="account-label">Account name</label><input ref={accountLabelInputRef} id="account-label" name="accountLabel" type="text" autoFocus autoComplete="off" spellCheck={false} required aria-invalid={Boolean(accountLabelError)} aria-describedby={accountLabelError ? 'account-label-help' : undefined} value={accountLabel} onChange={event => { setAccountLabel(event.target.value); if (accountLabelError) setAccountLabelError('') }} placeholder="Account name" />{accountLabelError && <small id="account-label-help" className="account-connect-help" role="alert">{accountLabelError}</small>}<button className="button button-primary" type="submit" disabled={busy || !accountLabel.trim() || !selectedMeta?.authSupported}><Plus size={14} /> Start authorization</button></form></div>}
+      {showImport && <div className="account-connect-panel"><div><strong>Import cookie data</strong><p>Paste a cookie array or a session envelope with cookies, localStorage, sessionStorage, and origin. Values are encrypted locally.</p></div><form className="account-connect-form" onSubmit={event => { event.preventDefault(); void importCookies() }} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}><label htmlFor="import-account-label">Account name</label><input id="import-account-label" name="importLabel" type="text" autoComplete="off" value={importLabel} onChange={event => setImportLabel(event.target.value)} placeholder="Account name (new account only)" /><select aria-label="Existing account for import" value={importAccountId} onChange={event => setImportAccountId(event.target.value)}><option value="">Create new account</option>{platformAccounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}</select><textarea aria-label="Cookie JSON" value={cookieJson} onChange={event => setCookieJson(event.target.value)} placeholder='[{"name":"...","value":"..."}] or {"cookies":[...]}' rows={5} /><button className="button button-primary" type="submit" disabled={busy || ((!importLabel.trim() && !importAccountId) || !cookieJson.trim() || !selectedMeta?.authSupported)}>Import encrypted session</button></form></div>}
+      {error && <div className="publisher-error"><CircleAlert size={15} /> {error}</div>}{accounts.find(account => account.lastError) && <div className="publisher-error"><CircleAlert size={15} /> {mapPublisherError(accounts.find(account => account.lastError)?.lastError || 'Account action required')}</div>}
+      <div className="table-toolbar concept-toolbar"><label className="concept-search"><Search size={16} /><input aria-label="Search accounts" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search accounts" /></label><label className="concept-filter">Status<select value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="all">All</option><option value="ready">Connected</option><option value="login-required">Reauthorization required</option><option value="error">Action required</option></select></label><button className="icon-button" aria-label="Refresh accounts" onClick={() => void refresh()}><RefreshCw size={16} /></button></div>
+      <section className="publisher-table-card"><div className="table-scroll"><table className="concept-table"><thead><tr><th>Account</th><th>Platform</th><th>Authorization</th><th>Status</th><th>Updated</th><th>Actions</th></tr></thead><tbody>{filtered.map(account => { const meta = platforms.find(platform => platform.id === account.platform); const imported = Boolean(account.sessionConfigured); return <tr key={account.id}><td><div className="account-cell">{account.avatarUrl ? <img className="account-avatar" src={account.avatarUrl} alt="" referrerPolicy="no-referrer" /> : <PlatformMark platform={account.platform} />}<div>{editingId === account.id ? <div className="inline-edit"><input autoFocus value={editingLabel} onChange={event => setEditingLabel(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void finishRename(account); if (event.key === 'Escape') { setEditingId(null); setEditingLabel('') } }} /><button className="icon-button" aria-label="Save account name" onClick={() => void finishRename(account)}><Check size={14} /></button></div> : <strong>{account.accountName || account.label}</strong>}<small>{account.accountName ? account.label : account.id}</small></div></div></td><td><span className="platform-cell"><PlatformMark platform={account.platform} size="small" /> {meta?.nameZh || account.platform}</span></td><td><span className={`authorization-state ${account.status === 'ready' ? 'connected' : 'expired'}`}>{account.status === 'ready' ? <Check size={13} /> : <CircleAlert size={13} />}{accountStatusLabel(account.status)}</span><small>{account.status === 'ready' ? 'Session verified locally' : imported ? 'Imported session; verify available' : 'Finish authorization in Electron'}</small></td><td><span className={`status-dot-label ${statusTone(account.status)}`}><span className="status-dot" />{account.status === 'ready' ? 'Connected' : 'Disconnected'}<small>{account.status === 'ready' ? 'Healthy' : 'Action required'}</small></span></td><td>{formatUpdated(account.updatedAt)}</td><td><div className="row-actions">{meta?.operational && <button className="icon-button" title="Open account" disabled={busy} onClick={() => void runAccountAction(() => publisherApi.open(account.id), 'Account profile opened')}><ExternalLink size={15} /></button>}<button className="icon-button" title="Reauthorize" disabled={busy} onClick={() => void runAccountAction(() => publisherApi.reauthorize(account.id), 'Reauthorization started')}><RotateCcw size={15} /></button><button className="icon-button" title="Rename" disabled={busy} onClick={() => { setEditingId(account.id); setEditingLabel(account.label) }}><Pencil size={15} /> </button>{imported && account.status !== 'ready' && <button className="icon-button" title="Verify imported session" disabled={busy} onClick={() => void runAccountAction(() => publisherApi.verify(account.id), 'Imported session verified')}><ShieldCheck size={15} /></button>}<button className="icon-button danger-icon" title="Disconnect" disabled={busy} onClick={() => { if (window.confirm(`Disconnect ${account.label}? Unfinished jobs will be cancelled.`)) void runAccountAction(() => publisherApi.disconnect(account.id), 'Account disconnected') }}><Trash2 size={15} /></button></div></td></tr> })}</tbody></table></div>{filtered.length === 0 && <div className="publisher-empty"><UserRound size={20} /><strong>{error ? 'Publisher service unavailable' : 'No accounts found'}</strong><p>{error ? 'Start the local publisher service and refresh.' : `No ${selectedMeta?.name || 'media'} accounts found.`}</p></div>}<div className="table-footer"><span>Showing {filtered.length} of {accounts.length} accounts</span><span>Sessions are stored locally and never placed in browser storage.</span></div></section>
+    </section>
+  </div>
+}
+
+const lifecycle = ['queued', 'editor-open', 'content-filled', 'draft-saved', 'awaiting-approval', 'publishing', 'published']
+const progressByStatus: Record<string, number> = { queued: 0, 'login-required': 0, 'editor-open': 25, 'content-filled': 50, 'draft-saved': 75, 'awaiting-approval': 100, publishing: 100, published: 100, failed: 0, 'failed-inspection': 100, cancelled: 0 }
+
+function JobDetail({ job, account, busy, onApprove, onCancel, onClose }: { job: PublisherJob; account?: PublisherAccount; busy: boolean; onApprove: () => void; onCancel: () => void; onClose?: () => void }) {
+  const [showDraft, setShowDraft] = useState(false)
+  const reached = lifecycle.indexOf(job.status)
+  return <aside className="queue-detail-panel"><div className="queue-detail-heading"><div><span className="detail-kicker">Task details</span><h3>{job.title}</h3><small>#{job.id.slice(-6)}</small></div><button className="icon-button" aria-label="Close task details" onClick={onClose}><X size={17} /></button></div><div className="detail-meta"><div><span>Account</span><strong><PlatformMark platform={job.platform} size="small" /> {account?.label || job.accountId}</strong></div><div><span>Platform</span><strong><PlatformMark platform={job.platform} size="small" /> Zhihu</strong></div></div>{(job.aiDisclosure !== undefined || job.coverFirstBodyImage !== undefined || job.coverStatus) && <div className="job-outcomes"><span className={job.aiDisclosureSelected ? 'complete' : ''}><Check size={13} /> {job.aiDisclosure ? (job.aiDisclosureSelected ? 'AI disclosure selected' : 'AI disclosure requested') : 'AI disclosure off'}</span><span className={job.coverFirstBodyImage === false ? 'muted' : job.coverStatus?.startsWith('selected') ? 'complete' : ''}><Eye size={13} /> {job.coverFirstBodyImage === false ? 'Cover selection off' : job.coverStatus ? `Cover ${job.coverStatus}` : 'First body image cover'}</span></div>}<div className="lifecycle"><h4>Lifecycle</h4>{lifecycle.map((step, index) => { const done = reached >= index && job.status !== 'failed' && job.status !== 'cancelled'; const current = step === job.status; return <div className={`lifecycle-step ${done ? 'done' : ''} ${current ? 'current' : ''}`} key={step}><span className="lifecycle-icon">{done ? <Check size={13} /> : <Clock3 size={13} />}</span><div><strong>{jobStatusLabel(step)}</strong><small>{current ? formatUpdated(job.updatedAt) : done ? 'Completed' : 'Waiting'}</small></div></div>})}</div>{(job.error || job.status === 'failed' || job.status === 'failed-inspection') && <div className="detail-error"><CircleAlert size={15} /><span>{job.error || 'The worker could not complete this task.'}</span></div>}<div className="worker-state"><span className="status-dot" /> Worker {job.heartbeatAt ? `heartbeat ${formatUpdated(job.heartbeatAt)}` : 'waiting for lease'}<small>{job.attempt || 0} / {job.maxAttempts || 3} attempts</small></div><div className="queue-detail-actions">{(job.status === 'awaiting-approval' || job.status === 'draft-saved') && <><button className="button button-outline" disabled={busy || !job.content} onClick={() => setShowDraft(value => !value)}><Eye size={14} /> {job.content ? (showDraft ? 'Hide draft' : 'Review draft') : 'Draft unavailable'}</button>{showDraft && job.content && <div className="detail-draft-preview">{job.content.slice(0, 2400)}</div>}<button className="button button-primary" disabled={busy} onClick={onApprove}><Check size={14} /> Approve & publish</button></>}{job.status === 'failed-inspection' && <button className="button button-outline" disabled={busy} onClick={onCancel}><X size={14} /> Close debug browser</button>}{!['published', 'cancelled', 'failed'].includes(job.status) && job.status !== 'failed-inspection' && <button className="button button-outline" disabled={busy} onClick={onCancel}>Cancel task</button>}{job.externalUrl && <a className="button button-soft" href={job.externalUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} /> Open result</a>}</div></aside>
+}
+
+export function PublishingQueuePanel({ articles, notify }: { articles: Article[]; notify: Notice }) {
+  const [accounts, setAccounts] = useState<PublisherAccount[]>([])
+  const [jobs, setJobs] = useState<PublisherJob[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [filter, setFilter] = useState('all')
+  const [search, setSearch] = useState('')
+  const [articleId, setArticleId] = useState(articles[0]?.id || '')
+  const [accountId, setAccountId] = useState('')
+  const [showCreate, setShowCreate] = useState(false)
+  const [showBrowser, setShowBrowser] = useState(false)
+  const [manualReview, setManualReview] = useState(false)
+  const [aiDisclosure, setAiDisclosure] = useState(false)
+  const [coverFirstBodyImage, setCoverFirstBodyImage] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const refresh = async () => { try { const [accountPayload, jobPayload] = await Promise.all([publisherApi.listAccounts(), publisherApi.listJobs()]); setAccounts(accountPayload.accounts); setJobs(jobPayload.jobs); setAccountId(current => accountPayload.accounts.some(account => account.id === current && account.status === 'ready') ? current : accountPayload.accounts.find(account => account.status === 'ready')?.id || ''); setSelectedId(current => current && jobPayload.jobs.some(job => job.id === current) ? current : jobPayload.jobs[0]?.id || null); setError('') } catch (err) { setError(err instanceof Error ? err.message : 'Publisher service unavailable') } }
+  useEffect(() => { void refresh() }, [])
+  useEffect(() => { const active = jobs.some(job => !['published', 'failed', 'cancelled'].includes(job.status)); if (!active) return; const timer = window.setInterval(() => void refresh(), 5000); return () => window.clearInterval(timer) }, [jobs])
+  const counts = useMemo(() => ({ all: jobs.length, queued: jobs.filter(job => job.status === 'queued').length, preparing: jobs.filter(job => ['editor-open', 'content-filled', 'draft-saved'].includes(job.status)).length, approval: jobs.filter(job => job.status === 'awaiting-approval').length, publishing: jobs.filter(job => job.status === 'publishing').length, published: jobs.filter(job => job.status === 'published').length, failed: jobs.filter(job => ['failed', 'failed-inspection'].includes(job.status)).length }), [jobs])
+  const visibleJobs = jobs.filter(job => (filter === 'all' || (filter === 'preparing' ? ['editor-open', 'content-filled', 'draft-saved'].includes(job.status) : filter === 'failed' ? ['failed', 'failed-inspection'].includes(job.status) : job.status === filter)) && `${job.title} ${job.id}`.toLowerCase().includes(search.toLowerCase()))
+  const selectedJob = jobs.find(job => job.id === selectedId) || null
+  const accountMap = useMemo(() => new Map(accounts.map(account => [account.id, account])), [accounts])
+  const create = async () => { const article = articles.find(item => item.id === articleId); if (!article || !accountId) return; setBusy(true); setError(''); try { await publisherApi.setMode(accountId, showBrowser ? 'visible' : 'background'); const result = await publisherApi.createJob({ accountId, title: article.title, content: article.body || `${article.title}\n\n${article.keyword}`, manualReview, aiDisclosure, coverFirstBodyImage, pacingMode: 'human' }); setSelectedId(result.job.id); setShowCreate(false); notify('Publishing task queued'); await refresh() } catch (err) { setError(err instanceof Error ? err.message : 'Could not create publishing task') } finally { setBusy(false) } }
+  const action = async (fn: () => Promise<unknown>, message: string) => { setBusy(true); setError(''); try { await fn(); notify(message); await refresh() } catch (err) { setError(err instanceof Error ? err.message : 'Publishing action failed') } finally { setBusy(false) } }
+  return <div className="publishing-surface queue-surface"><div className="publishing-context-rail queue-rail"><div className="context-rail-heading"><span className="context-rail-icon"><Play size={16} /></span><strong>Publishing queue</strong></div>{[['all', 'All tasks', counts.all], ['queued', 'Queued', counts.queued], ['preparing', 'Preparing', counts.preparing], ['awaiting-approval', 'Awaiting approval', counts.approval], ['publishing', 'Publishing', counts.publishing], ['published', 'Published', counts.published], ['failed', 'Failed', counts.failed]].map(([value, label, count]) => <button className={`queue-filter ${filter === value ? 'selected' : ''}`} key={value} onClick={() => setFilter(String(value))}><span>{label}</span><b>{count}</b></button>)}</div><section className="publishing-main-panel queue-main"><div className="publishing-heading-row"><div><h2>Publishing queue</h2><p>Start a task to prepare and publish through the selected account. Enable manual review to pause before the final publish click.</p></div><button className="button button-primary" onClick={() => setShowCreate(value => !value)}><Plus size={15} /> New publishing task</button></div>{showCreate && <div className="queue-create-panel"><label>Article<select value={articleId} onChange={event => setArticleId(event.target.value)}>{articles.map(article => <option key={article.id} value={article.id}>{article.title}</option>)}</select></label><label>Account<select value={accountId} onChange={event => setAccountId(event.target.value)}>{accounts.filter(account => account.status === 'ready').map(account => <option key={account.id} value={account.id}>{account.label}</option>)}</select></label><div className="queue-create-options"><label className="queue-visible-toggle"><input type="checkbox" checked={showBrowser} onChange={event => setShowBrowser(event.target.checked)} /> Show browser during preparation</label><label className="queue-visible-toggle"><input type="checkbox" checked={manualReview} onChange={event => setManualReview(event.target.checked)} /> Pause for manual review</label><label className="queue-visible-toggle"><input type="checkbox" checked={aiDisclosure} onChange={event => setAiDisclosure(event.target.checked)} /> Mark as AI-generated content</label><label className="queue-visible-toggle"><input type="checkbox" checked={coverFirstBodyImage} onChange={event => setCoverFirstBodyImage(event.target.checked)} /> Use first article image as cover</label></div><button className="button button-primary" disabled={busy || !accountId || !articleId} onClick={() => void create()}><Play size={14} /> Start publishing task</button></div>}{error && <div className="publisher-error"><CircleAlert size={15} /> {error}</div>}<div className="table-toolbar concept-toolbar"><label className="concept-search"><Search size={16} /><input aria-label="Search tasks" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search tasks" /></label><button className="icon-button" aria-label="Refresh queue" onClick={() => void refresh()}><RefreshCw size={16} /></button></div><div className={`queue-table-layout ${selectedJob ? 'has-detail' : ''}`}><section className="publisher-table-card"><div className="table-scroll"><table className="concept-table"><thead><tr><th>Article</th><th>Account</th><th>Platform</th><th>State</th><th>Progress</th><th>Updated</th><th>Actions</th></tr></thead><tbody>{visibleJobs.map(job => { const progress = progressByStatus[job.status] ?? 0; return <tr className={selectedId === job.id ? 'selected-row' : ''} key={job.id} onClick={() => setSelectedId(job.id)}><td><strong className="table-title">{job.title}</strong><small>#{job.id.slice(-6)}</small></td><td><span className="account-cell compact"><PlatformMark platform={job.platform} size="small" />{accountMap.get(job.accountId)?.label || job.accountId}</span></td><td><span className="platform-cell"><PlatformMark platform={job.platform} size="small" /> Zhihu</span></td><td><span className={`queue-state ${statusTone(job.status)}`}>{job.status === 'publishing' ? <LoaderCircle size={14} className="spin-icon" /> : job.status === 'published' ? <Check size={14} /> : job.status === 'failed' ? <X size={14} /> : <Clock3 size={14} />}{jobStatusLabel(job.status)}</span></td><td><div className="progress-cell"><span>{progress}%</span><div className="progress"><span style={{ width: `${progress}%` }} /></div></div></td><td>{formatUpdated(job.updatedAt)}</td><td><button className="icon-button" aria-label={`View ${job.title}`} onClick={event => { event.stopPropagation(); setSelectedId(job.id) }}><Eye size={15} /></button></td></tr> })}</tbody></table></div>{visibleJobs.length === 0 && <div className="publisher-empty"><Clock3 size={20} /><strong>{error ? 'Publisher service unavailable' : 'No tasks in this view'}</strong><p>{error ? 'Start the local publisher service and refresh.' : 'Create a publishing task from an approved article.'}</p></div>}<div className="table-footer"><span>Showing {visibleJobs.length} of {jobs.length} tasks</span><span>Lease: 5m · heartbeat: 10s</span></div></section>{selectedJob && <JobDetail job={selectedJob} account={accountMap.get(selectedJob.accountId)} busy={busy} onApprove={() => void action(() => publisherApi.approve(selectedJob.id), 'Publishing approval sent')} onCancel={() => void action(() => publisherApi.cancel(selectedJob.id), 'Publishing task cancelled')} onClose={() => setSelectedId(null)} />}</div></section></div>
+}
+
+export function PublisherPanel({ articles, notify }: { articles: Article[]; notify: Notice }) { return <PublishingQueuePanel articles={articles} notify={notify} /> }

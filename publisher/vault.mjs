@@ -67,7 +67,11 @@ export function normalizeCookies(input) {
 
 export async function saveCookies(accountId, cookies) {
   const vault = await readVault()
-  vault[accountId] = { savedAt: new Date().toISOString(), cookies }
+  vault[accountId] = {
+    ...(vault[accountId] || {}),
+    savedAt: new Date().toISOString(),
+    cookies,
+  }
   await writeVault(vault)
 }
 
@@ -76,8 +80,50 @@ export async function loadCookies(accountId) {
   return vault[accountId]?.cookies || []
 }
 
+// Loke captures the complete browser session, not just cookies.  The local
+// adapter keeps the same observable lifecycle while storing the sensitive
+// values in the AES-GCM vault (never in the public state JSON or browser
+// storage).  Storage values are strings because that is how Web Storage
+// exposes them; malformed values are ignored by the caller when restoring.
+export async function saveSession(accountId, { cookies = [], localStorage = {}, sessionStorage = {}, origin = '' } = {}) {
+  const vault = await readVault()
+  vault[accountId] = {
+    ...(vault[accountId] || {}),
+    savedAt: new Date().toISOString(),
+    cookies: Array.isArray(cookies) ? cookies : [],
+    localStorage: normalizeStorage(localStorage),
+    sessionStorage: normalizeStorage(sessionStorage),
+    origin: typeof origin === 'string' ? origin.slice(0, 200) : '',
+  }
+  await writeVault(vault)
+}
+
+export async function loadSession(accountId) {
+  const vault = await readVault()
+  const session = vault[accountId]
+  if (!session) return { cookies: [], localStorage: {}, sessionStorage: {}, origin: '', savedAt: null }
+  return {
+    cookies: Array.isArray(session.cookies) ? session.cookies : [],
+    localStorage: normalizeStorage(session.localStorage),
+    sessionStorage: normalizeStorage(session.sessionStorage),
+    origin: typeof session.origin === 'string' ? session.origin : '',
+    savedAt: session.savedAt || null,
+  }
+}
+
+function normalizeStorage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key, item]) => typeof key === 'string' && typeof item === 'string')
+    .map(([key, item]) => [key.slice(0, 512), item.slice(0, 512_000)]))
+}
+
 export async function deleteCookies(accountId) {
   const vault = await readVault()
   delete vault[accountId]
   await writeVault(vault)
+}
+
+export async function deleteSession(accountId) {
+  return deleteCookies(accountId)
 }

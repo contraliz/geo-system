@@ -1,4 +1,6 @@
 .geo-publisher/
+.geo-desktop/
+.geo-desktop-live/
 
 # Local secrets and machine-specific configuration
 .env
@@ -14,6 +16,9 @@ test-results/
 # Local agent/editor state
 .claude/settings.local.json
 .workbuddy/
+docs/.obsidian/
 
 # Build output
 dist/
+.npm-cache-temp/
+.electron-cache/
