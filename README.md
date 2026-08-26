@@ -4,7 +4,7 @@ This is a neutral, local-only content operations SPA for exploring the path from
 
 ## Project documentation
 
-The source of truth is the Obsidian vault in [`docs/`](docs/README.md). Start with [`docs/Home.md`](docs/Home.md). Architecture, current implementation status, decisions, operating procedures, and unresolved verification work belong there.
+Canonical project documentation is maintained in an external/local Obsidian sub-vault. The repository's [`docs/README.md`](docs/README.md) is a pointer only. The local `AGENTS.override.md` binding supplies the canonical location to agents; if it is unavailable, non-trivial work must stop.
 
 ## Local setup
 
@@ -45,7 +45,11 @@ The publisher listens on `http://127.0.0.1:8788` and Vite proxies `/api/publishe
 
 ### Live writing agent (optional)
 
-Tasks that select a real model label (`MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2`) call a local Node proxy that forwards Anthropic-format requests to the configured upstream. The proxy holds the API key in its environment; the browser never sees it.
+Tasks that select a real model label (`MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2`) call a local Node proxy that forwards Anthropic-format requests to the configured upstream. In the Electron app, Settings opens a dedicated key window; Electron encrypts the key in its local user-data directory and passes it only to the proxy child process. The main GEO renderer receives sanitized status, quota, and model responses, never the key.
+
+For the desktop app, start `npm run desktop:dev`, open **About & Settings → Live writing agent**, and choose **Configure API key**. The encrypted development credential is stored under the ignored `.geo-desktop/` runtime directory; production uses the OS application-data directory.
+
+For web-only development, use the ignored repository-root `.env` fallback:
 
 ```bash
 cp .env.example .env       # defaults to MiniMax China endpoint; switch to international or direct-Anthropic as needed
@@ -53,13 +57,13 @@ cp .env.example .env       # defaults to MiniMax China endpoint; switch to inter
 npm run dev:full           # vite + the proxy together
 ```
 
-`.env.example` defaults to `https://api.minimaxi.com/anthropic` (MiniMax China). For MiniMax international, set `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic`. For direct Anthropic, set `ANTHROPIC_BASE_URL=https://api.anthropic.com`. The Settings → Live writing agent panel shows connection status and lets you send a test ping.
+`.env.example` defaults to `https://api.minimaxi.com/anthropic` (MiniMax China). For MiniMax international, set `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic`. For direct Anthropic, set `ANTHROPIC_BASE_URL=https://api.anthropic.com`. The Settings → Live writing agent panel shows connection status and lets you send a test ping. For MiniMax Token Plan keys, the former compute-points markers show the sanitized percentage remaining in the provider's five-hour quota window; unsupported or unavailable quota responses display as unavailable.
 
 ## Verification checklist
 
 Run `npm run build` after changes. In the browser, check every sidebar route, create/edit/duplicate/delete/filter/reset interaction, the English/简体中文 switch and reload persistence, dark mode, the mobile navigation drawer, and the browser console. The demo stores its state in `localStorage`; malformed, legacy, partial, or nested stored state is defensively migrated back to a valid local snapshot.
 
-Monitoring, model validation, report generation, CSV export, publishing, account setup, website channels, influencer planning, and SEO checks are simulated local records only. The local Node proxy is the only component that talks to a remote upstream, and only when a task uses a real (MiniMax) model label — the proxy URL is configured via `ANTHROPIC_BASE_URL` and the key via `ANTHROPIC_API_KEY`; the browser never holds them.
+Monitoring, model validation, report generation, CSV export, publishing, account setup, website channels, influencer planning, and SEO checks are simulated local records only. The local Node proxy is the only component that talks to the model/quota upstream. The normal browser workspace never receives or persists the API key.
 
 ## Feature inventory
 

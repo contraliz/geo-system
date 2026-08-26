@@ -6,12 +6,14 @@ import { publisherApi, accountStatusLabel, jobStatusLabel, mapPublisherError, ty
 type Notice = (message: string) => void
 
 type DesktopAuthorizationResult = { ok: boolean; status?: string; message?: string; error?: string }
+type DesktopApiKeyResult = { ok: boolean; configured?: boolean; cancelled?: boolean; error?: string }
 
 declare global {
   interface Window {
     geoDesktop?: {
       isDesktop: boolean
       openAuthWindow: (input: { accountId: string; platform: string }) => Promise<DesktopAuthorizationResult>
+      openApiKeyWindow: (language?: 'en' | 'zh') => Promise<DesktopApiKeyResult>
     }
   }
 }

@@ -1,6 +1,7 @@
 import type { Article, CreationTask, KnowledgeBase, KnowledgeEntry, KeywordSet, WritingInstruction } from './data'
 
 export type AgentStatus = { configured: boolean; provider: 'minimax' | 'anthropic' | 'unknown'; display: string }
+export type MiniMaxUsage = { available: boolean; remainingPercent?: number }
 
 export async function fetchAgentStatus(): Promise<AgentStatus> {
   try {
@@ -9,6 +10,18 @@ export async function fetchAgentStatus(): Promise<AgentStatus> {
     return await response.json() as AgentStatus
   } catch {
     return { configured: false, provider: 'unknown', display: '' }
+  }
+}
+
+export async function fetchMiniMaxUsage(): Promise<MiniMaxUsage> {
+  try {
+    const response = await fetch('/api/anthropic/usage')
+    if (!response.ok) return { available: false }
+    const payload = await response.json() as MiniMaxUsage
+    if (payload?.available !== true || typeof payload.remainingPercent !== 'number' || !Number.isFinite(payload.remainingPercent)) return { available: false }
+    return { available: true, remainingPercent: Math.min(100, Math.max(0, payload.remainingPercent)) }
+  } catch {
+    return { available: false }
   }
 }
 

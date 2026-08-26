@@ -1,11 +1,5 @@
-# GEO System documentation
+# GEO System documentation pointer
 
-This directory is an Obsidian vault and the project source of truth.
+The repository no longer contains the canonical GEO System project-knowledge vault. The canonical documentation is maintained in the local master vault through the local `AGENTS.override.md` binding. Agents working on GEO System must use that binding and stop if the canonical sub-vault is unavailable.
 
-- Open this `docs` directory as a vault in Obsidian.
-- Start with [[GEO System Overview.canvas|Project Canvas]] for the visual overview, then use [[Home]] for the full note index.
-- Read [[Current State]] before changing account authorization or publishing.
-- Record architectural changes in [[Decisions/Decision Log]].
-- Do not put cookies, tokens, passwords, API keys, session payloads, or personal account data in this vault.
-
-The root `README.md` remains the quick-start entry point. When it conflicts with this vault, verify the implementation and update both; do not silently choose one.
+Open the local canonical sub-vault through the agent binding before non-trivial work. Code and tests remain canonical in this repository.

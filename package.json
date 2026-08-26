@@ -7,14 +7,14 @@
     "dev": "node --no-maglev node_modules/vite/bin/vite.js",
     "dev:full": "concurrently --kill-others-on-fail -n vite,proxy,publisher -c blue,magenta,green \"node --no-maglev node_modules/vite/bin/vite.js\" \"node --no-maglev --env-file-if-exists=.env server/proxy.mjs\" \"node --no-maglev --env-file-if-exists=.env publisher/server.mjs\"",
     "desktop": "electron desktop/main.mjs",
-    "desktop:dev": "concurrently --kill-others-on-fail -n vite,proxy,desktop -c blue,magenta,green \"node --no-maglev node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173 --strictPort\" \"node --no-maglev --env-file-if-exists=.env server/proxy.mjs\" \"electron desktop/main.mjs --dev\"",
+    "desktop:dev": "concurrently --kill-others-on-fail -n vite,desktop -c blue,green \"node --no-maglev node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173 --strictPort\" \"electron desktop/main.mjs --dev\"",
     "proxy": "node --no-maglev --env-file-if-exists=.env server/proxy.mjs",
     "publisher": "node --no-maglev --env-file-if-exists=.env publisher/server.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test:smoke": "node tests/fixtures/make-png.cjs && playwright test",
     "test:smoke:install": "playwright install chromium",
-    "test:unit": "node --test tests/publisher-vault.test.mjs tests/publisher-session.test.mjs tests/publisher-runtime.test.mjs tests/publisher-store.test.mjs tests/publisher-common.test.mjs tests/electron-auth.test.mjs tests/desktop-readiness.test.mjs tests/desktop-auth-server.test.mjs"
+    "test:unit": "node --test tests/publisher-vault.test.mjs tests/publisher-session.test.mjs tests/publisher-runtime.test.mjs tests/publisher-store.test.mjs tests/publisher-common.test.mjs tests/electron-auth.test.mjs tests/desktop-readiness.test.mjs tests/desktop-auth-server.test.mjs tests/credential-store.test.mjs tests/desktop-credentials.test.mjs tests/minimax-usage.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",

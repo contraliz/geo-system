@@ -15,10 +15,16 @@
 
 import http from 'node:http'
 import Anthropic from '@anthropic-ai/sdk'
+import { fetchMiniMaxUsage } from './minimax-usage.mjs'
 
 const PORT = Number(process.env.PROXY_PORT || 8787)
 const ALLOW_ORIGIN = process.env.PROXY_ALLOW_ORIGIN || 'http://127.0.0.1:5174'
 const MAX_BODY_BYTES = 4 * 1024 * 1024
+const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
+
+function configuredBaseUrl() {
+  return process.env.ANTHROPIC_BASE_URL || DEFAULT_ANTHROPIC_BASE_URL
+}
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -55,7 +61,7 @@ function sendJson(res, status, payload) {
 }
 
 function describeUpstream() {
-  const baseUrl = process.env.ANTHROPIC_BASE_URL || ''
+  const baseUrl = configuredBaseUrl()
   const provider = baseUrl.includes('minimax') ? 'minimax' : 'anthropic'
   const display = baseUrl ? baseUrl.replace(/\/\/(.+?)\..*/, (_m, host) => `//${host}.<redacted>`) : ''
   return { provider, display }
@@ -79,7 +85,7 @@ async function handleMessages(req, res) {
   }
 
   try {
-    const client = new Anthropic() // picks up ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL from env
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: configuredBaseUrl() })
     const response = await client.messages.create({
       model: payload.model,
       max_tokens: payload.max_tokens ?? 1024,
@@ -116,7 +122,14 @@ const server = http.createServer(async (req, res) => {
       configured: Boolean(process.env.ANTHROPIC_API_KEY),
       ...describeUpstream(),
       proxyPort: PORT,
+      pid: process.pid,
     })
+    return
+  }
+
+  if (req.method === 'GET' && url.startsWith('/api/anthropic/usage')) {
+    const usage = await fetchMiniMaxUsage({ apiKey: process.env.ANTHROPIC_API_KEY, baseUrl: configuredBaseUrl() })
+    sendJson(res, 200, usage)
     return
   }
 

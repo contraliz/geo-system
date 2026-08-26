@@ -15,7 +15,7 @@ async function gotoFresh(page: import('@playwright/test').Page) {
     try { window.localStorage.clear() } catch {}
   })
   await page.reload()
-  await expect(page.getByRole('button', { name: /Dashboard/i }).first()).toBeVisible()
+  await expect(page.locator('.app-shell')).toBeVisible()
 }
 
 test.describe('GEO operations smoke harness', () => {
@@ -52,6 +52,71 @@ test.describe('GEO operations smoke harness', () => {
     await page.locator('button[aria-label="Toggle theme"]').click()
     const afterLight = await root.getAttribute('data-theme')
     expect(afterLight).toEqual(initialTheme)
+  })
+
+  test('desktop sidebar stays anchored, has its own scroll region, and does not overlap content', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 })
+    await gotoFresh(page)
+    const sidebar = page.locator('.global-sidebar')
+    const content = page.locator('.page-wrap')
+    await expect(sidebar).toBeVisible()
+    const metrics = await sidebar.evaluate(element => ({ position: getComputedStyle(element).position, overflowY: getComputedStyle(element).overflowY }))
+    expect(metrics.position).toBe('sticky')
+    expect(metrics.overflowY).toBe('auto')
+    const before = await sidebar.boundingBox()
+    const contentBox = await content.boundingBox()
+    expect(before).not.toBeNull()
+    expect(contentBox).not.toBeNull()
+    expect(before!.x + before!.width).toBeLessThanOrEqual(contentBox!.x + 1)
+    await content.evaluate(element => { element.scrollTop = 500 })
+    const after = await sidebar.boundingBox()
+    expect(after!.y).toBe(before!.y)
+  })
+
+  test('mobile navigation is an accessible drawer containing every route', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await gotoFresh(page)
+    const menu = page.getByRole('button', { name: 'Open navigation' })
+    await expect(menu).toBeVisible()
+    await menu.click()
+    const sidebar = page.locator('#geo-global-navigation')
+    await expect(sidebar).toBeVisible()
+    await expect(sidebar).toHaveAttribute('data-mobile-hidden', 'false')
+    await expect(sidebar.locator('.context-rail-item')).toHaveCount(17)
+    await expect(page.getByRole('button', { name: 'Close navigation' })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(sidebar).not.toBeVisible()
+    await expect(sidebar).toHaveAttribute('data-mobile-hidden', 'true')
+    await menu.click()
+    await expect(sidebar).toBeVisible()
+    await sidebar.getByRole('button', { name: 'Image Libraries' }).click()
+    await expect(page.getByRole('heading', { name: 'Image Libraries' })).toBeVisible()
+    await expect(sidebar).toHaveAttribute('data-mobile-hidden', 'true')
+  })
+
+  test('Chinese mode translates GEO UI while preserving user-entered content verbatim', async ({ page }) => {
+    await gotoFresh(page)
+    await page.getByRole('button', { name: /Keyword Distillation/i }).first().click()
+    await page.getByRole('button', { name: /New keyword set/i }).click()
+    await page.getByPlaceholder('e.g. Operations planning').fill('Dashboard')
+    await page.getByRole('button', { name: /Create record/i }).click()
+    await expect(page.getByRole('heading', { name: 'Dashboard', level: 3 })).toBeVisible()
+    await page.getByRole('button', { name: 'Language' }).click()
+    await page.getByRole('menuitem', { name: '简体中文' }).click()
+    await expect(page.getByRole('heading', { name: 'Dashboard', level: 3 })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '关键词提炼', level: 1 })).toBeVisible()
+  })
+
+  test('dark mode uses semantic surfaces and persists after reload', async ({ page }) => {
+    await gotoFresh(page)
+    await page.locator('button[aria-label="Toggle theme"]').click()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+    const colors = await page.locator('.app-shell').evaluate(element => ({ background: getComputedStyle(element).backgroundColor, sidebar: getComputedStyle(element.querySelector('.global-sidebar')!).backgroundColor, text: getComputedStyle(element).color }))
+    expect(colors.background).not.toBe('rgb(238, 243, 248)')
+    expect(colors.sidebar).not.toBe('rgb(247, 250, 255)')
+    expect(colors.text).not.toBe('rgb(23, 34, 53)')
+    await page.reload()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   })
 
   test('image library: sample placeholder flow adds a record', async ({ page }) => {
@@ -120,6 +185,55 @@ test.describe('GEO operations smoke harness', () => {
     await expect(page.getByText(/^Last test$/)).toBeVisible()
     await expect(page.getByRole('button', { name: /Refresh status/i })).toBeVisible()
     await expect(page.getByRole('button', { name: /Send test ping/i })).toBeVisible()
+    await page.route('**/api/anthropic/v1/messages', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ content: [{ type: 'text', text: 'Provider-owned Dashboard' }] }) }))
+    await page.getByRole('button', { name: /Send test ping/i }).click()
+    await expect(page.getByText('Provider-owned Dashboard')).toBeVisible()
+    await page.getByRole('button', { name: 'Language' }).click()
+    await page.getByRole('menuitem', { name: '简体中文' }).click()
+    await expect(page.getByText('Provider-owned Dashboard')).toBeVisible()
+  })
+
+  test('MiniMax quota markers show a real percentage and open Settings', async ({ page }) => {
+    await page.route('**/api/anthropic/usage', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ available: true, remainingPercent: 84 }) }))
+    await gotoFresh(page)
+    await expect(page.getByText('84%', { exact: true })).toHaveCount(2)
+    await expect(page.getByText('MiniMax 5h left', { exact: true })).toHaveCount(2)
+    const markers = page.getByRole('button', { name: 'Open MiniMax quota settings' })
+    await expect(markers).toHaveCount(2)
+    await markers.first().click()
+    await expect(page.getByRole('heading', { level: 1, name: 'About & Settings' })).toBeVisible()
+  })
+
+  test('MiniMax quota markers show unavailable without inventing a percentage', async ({ page }) => {
+    await page.route('**/api/anthropic/usage', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ available: false }) }))
+    await gotoFresh(page)
+    await expect(page.getByText('MiniMax quota unavailable', { exact: true })).toHaveCount(2)
+    await expect(page.getByText('% MiniMax', { exact: false })).toHaveCount(0)
+  })
+
+  test('Electron API-key button refreshes Settings status without a real key', async ({ page }) => {
+    await page.addInitScript(() => {
+      let configured = false
+      const originalFetch = window.fetch.bind(window)
+      window.fetch = (input, init) => {
+        if (String(input).includes('/api/anthropic/status')) return Promise.resolve(new Response(JSON.stringify({ configured, provider: 'minimax', display: 'https://api.minimaxi.com/<redacted>' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+        return originalFetch(input, init)
+      }
+      const desktop = {
+        isDesktop: true,
+        openAuthWindow: async () => ({ ok: true }),
+        openApiKeyWindow: async () => { configured = true; return { ok: true, configured: true } },
+      }
+      ;(window as Window & { geoDesktop?: typeof desktop }).geoDesktop = desktop
+    })
+    await page.route('**/api/anthropic/usage', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ available: false }) }))
+    await gotoFresh(page)
+    await page.getByRole('button', { name: /About & Settings/i }).first().click()
+    const configure = page.getByRole('button', { name: 'Configure API key' })
+    await expect(configure).toBeEnabled()
+    await configure.click()
+    await expect(page.getByRole('button', { name: 'Replace API key' })).toBeVisible()
+    await expect(page.locator('.agent-status-grid').getByText('configured', { exact: true })).toBeVisible()
   })
 
   test('automatic creation lists the seeded MiniMax pilot task with a live-agent button', async ({ page }) => {

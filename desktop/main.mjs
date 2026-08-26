@@ -1,14 +1,15 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startLocalRendererServer } from './local-server.mjs'
 import { waitForHttp } from './readiness.mjs'
 import { openDesktopAuthWindow } from './auth-window.mjs'
 import { hasDesktopAuthProtocol, incompatiblePublisherError, readPublisherStatus } from './publisher-protocol.mjs'
 import { isAllowedRendererNavigation } from './navigation.mjs'
+import { readStoredApiKey, saveStoredApiKey } from './credential-store.mjs'
 
-const { app, BrowserWindow, ipcMain, session, shell } = await import('electron')
+const { app, BrowserWindow, ipcMain, safeStorage, session, shell } = await import('electron')
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.dirname(here)
 const useDevRenderer = process.argv.includes('--dev') || process.env.GEO_DESKTOP_DEV === '1'
@@ -30,6 +31,10 @@ let publisherProcess
 let proxyProcess
 let rendererServer
 let mainWindow
+let credentialWindow
+let credentialWindowResult
+let credentialLanguage = 'en'
+const credentialWindowPath = path.join(here, 'credential-window.html')
 
 async function startPublisherService() {
   const port = Number(process.env.PUBLISHER_PORT || 8788)
@@ -59,12 +64,105 @@ async function startPublisherService() {
   catch (error) { if (error.publisherReachable) throw new Error(incompatiblePublisherError({ port })); throw error }
 }
 
-function startProxyService() {
-  if (useDevRenderer || process.env.GEO_DESKTOP_EXTERNAL_PROXY === '1') return
+async function startProxyService() {
+  if (process.env.GEO_DESKTOP_EXTERNAL_PROXY === '1') return
   const proxyPath = path.join(root, 'server', 'proxy.mjs')
   const env = { ...process.env }
+  try {
+    const storedApiKey = await readStoredApiKey({ userDataPath: app.getPath('userData'), safeStorage })
+    if (storedApiKey) env.ANTHROPIC_API_KEY = storedApiKey
+  } catch {
+    // Environment/.env configuration remains the fallback for development.
+    console.error('[desktop] encrypted MiniMax API key unavailable; using environment configuration')
+  }
   if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1'
-  proxyProcess = spawn(process.execPath, [proxyPath], { cwd: root, env, stdio: 'inherit', windowsHide: true })
+  const child = spawn(process.execPath, ['--env-file-if-exists=.env', proxyPath], { cwd: root, env, stdio: 'inherit', windowsHide: true })
+  proxyProcess = child
+  proxyProcess.on('error', error => console.error('[desktop] proxy service failed:', error.message))
+  const statusUrl = `http://127.0.0.1:${Number(process.env.PROXY_PORT || 8787)}/api/anthropic/status`
+  await waitForHttp(statusUrl, { label: 'AI proxy' })
+  const status = await fetch(statusUrl).then(response => response.json()).catch(() => ({}))
+  if (!child.pid || status.pid !== child.pid || child.exitCode !== null || child.killed) {
+    if (!child.killed) child.kill()
+    proxyProcess = null
+    throw new Error('The desktop proxy did not own its status endpoint; stop the stale proxy on port 8787 and retry.')
+  }
+}
+
+async function stopProxyService() {
+  const child = proxyProcess
+  proxyProcess = null
+  if (!child || child.exitCode !== null) return
+  await new Promise(resolve => {
+    const timer = setTimeout(resolve, 1_500)
+    child.once('exit', () => { clearTimeout(timer); resolve() })
+    child.kill()
+  })
+}
+
+async function restartProxyService() {
+  await stopProxyService()
+  await startProxyService()
+}
+
+function resolveCredentialWindow(result) {
+  const resolve = credentialWindowResult?.resolve
+  credentialWindowResult = null
+  if (resolve) resolve(result)
+}
+
+function credentialError(english, chinese) {
+  return credentialLanguage === 'zh' ? chinese : english
+}
+
+function openCredentialWindow(language = 'en') {
+  if (credentialWindow && !credentialWindow.isDestroyed()) {
+    credentialWindow.focus()
+    return credentialWindowResult?.promise || Promise.resolve({ ok: false, cancelled: true })
+  }
+  credentialLanguage = language === 'zh' ? 'zh' : 'en'
+  credentialWindow = new BrowserWindow({
+    width: 590,
+    height: 430,
+    minWidth: 500,
+    minHeight: 380,
+    parent: mainWindow,
+    modal: true,
+    resizable: false,
+    show: false,
+    title: 'Configure Live writing agent / 配置实时写作代理',
+    webPreferences: {
+      preload: path.join(here, 'credential-preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+    },
+  })
+  let resolve
+  const promise = new Promise(nextResolve => { resolve = nextResolve })
+  credentialWindowResult = { promise, resolve }
+  const allowedCredentialUrl = pathToFileURL(credentialWindowPath).href
+  credentialWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  credentialWindow.webContents.on('will-navigate', (event, destination) => {
+    if (destination !== allowedCredentialUrl && !destination.startsWith(`${allowedCredentialUrl}?`)) event.preventDefault()
+  })
+  credentialWindow.webContents.on('did-fail-load', (_event, _code, _description, _validatedUrl, isMainFrame) => {
+    if (isMainFrame) {
+      resolveCredentialWindow({ ok: false, error: credentialError('The API-key window could not load. Restart the desktop app and try again.', 'API 密钥窗口无法加载，请重启桌面应用后重试。') })
+      if (!credentialWindow?.isDestroyed()) credentialWindow?.close()
+    }
+  })
+  credentialWindow.once('ready-to-show', () => credentialWindow?.show())
+  credentialWindow.on('closed', () => {
+    credentialWindow = null
+    resolveCredentialWindow({ ok: false, cancelled: true })
+  })
+  void credentialWindow.loadFile(credentialWindowPath, { query: { language: language === 'zh' ? 'zh' : 'en' } }).catch(() => {
+    resolveCredentialWindow({ ok: false, error: credentialError('The API-key window could not load. Restart the desktop app and try again.', 'API 密钥窗口无法加载，请重启桌面应用后重试。') })
+    if (!credentialWindow?.isDestroyed()) credentialWindow?.close()
+  })
+  return promise
 }
 
 async function showRendererError(win) {
@@ -117,8 +215,31 @@ app.whenReady().then(async () => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'Authorization requests are accepted only from the GEO desktop window.' }
     return openDesktopAuthWindow({ ...input, parent: mainWindow, publisherPort: process.env.PUBLISHER_PORT || 8788 })
   })
+  ipcMain.handle('geo-open-api-key-window', (event, input) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'API-key requests are accepted only from the GEO desktop window.' }
+    return openCredentialWindow(input?.language)
+  })
+  ipcMain.handle('geo-save-api-key', async (event, input) => {
+    if (!credentialWindow || event.sender !== credentialWindow.webContents) return { ok: false, error: 'Credential requests are accepted only from the API-key window.' }
+    try {
+      await saveStoredApiKey({ userDataPath: app.getPath('userData'), safeStorage }, input)
+      await restartProxyService()
+      const result = { ok: true, configured: true }
+      resolveCredentialWindow(result)
+      credentialWindow.close()
+      return result
+    } catch {
+      return { ok: false, error: credentialError('The API key could not be saved or the local proxy could not be restarted. Try again.', '无法保存 API 密钥或重启本地代理，请重试。') }
+    }
+  })
+  ipcMain.handle('geo-cancel-api-key', (event) => {
+    if (!credentialWindow || event.sender !== credentialWindow.webContents) return { ok: false, error: 'Credential requests are accepted only from the API-key window.' }
+    resolveCredentialWindow({ ok: false, cancelled: true })
+    credentialWindow.close()
+    return { ok: true, cancelled: true }
+  })
+  await startProxyService()
   if (!rendererUrl) {
-    startProxyService()
     rendererServer = await startLocalRendererServer({ root })
     rendererUrl = rendererServer.url
   }
